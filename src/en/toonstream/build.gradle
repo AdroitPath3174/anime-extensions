@@ -3,4 +3,4 @@ extName = 'Toonstream'
 extClass = '.Toonstream'
 extVersionCode = 1
 }
-apply plugin: "kei.plugins.extension.custom"
+apply plugin: "kei.plugins.extension.legacy"
