@@ -1,12 +1,14 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
-
-ext {
-    extName = 'Toonstream'
-    pkgNameSuffix = 'en.toonstream'
-    extClass = '.Toonstream'
-    extVersionCode = 1
-    libVersion = '14'
+android {
+compileSdk = 34
+namespace = 'eu.kanade.tachiyomi.animeextension.en.toonstream'
 }
-
+ext {
+extName = 'Toonstream'
+pkgNameSuffix = 'en.toonstream'
+extClass = '.Toonstream'
+extVersionCode = 1
+libVersion = '14'
+}
 apply from: "$rootDir/common.gradle"
