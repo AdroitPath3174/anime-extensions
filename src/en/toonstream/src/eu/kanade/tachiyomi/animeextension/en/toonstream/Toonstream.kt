@@ -52,7 +52,5 @@ class Toonstream : ParsedAnimeHttpSource() {
         return episode
     }
 
-    override fun videoListParse(response: okhttp3.Response): List<Video> {
-        return listOf(Video("https://example.com/video.mp4", "Toonstream Video", "https://example.com/video.mp4"))
-    }
+    
 }
