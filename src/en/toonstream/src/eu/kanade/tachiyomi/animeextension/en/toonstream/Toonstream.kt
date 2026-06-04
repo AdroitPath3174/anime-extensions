@@ -6,7 +6,6 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -53,16 +52,16 @@ class Toonstream : ParsedAnimeHttpSource() {
         return episode
     }
 
-    override fun videoListParse(response: okhttp3.Response): List<Video> {
-        val htmlContent = response.body?.string() ?: ""
-        val document = Jsoup.parse(htmlContent)
-        val videoList = mutableListOf<Video>()
-        document.select("iframe").forEach { element ->
-            val url = if (element.hasAttr("data-src")) element.attr("data-src") else element.attr("src")
-            if (url.isNotEmpty()) {
-                videoList.add(Video(url, "Server Player", url))
-            }
+    override fun videoListSelector(): String = "iframe"
+
+    override fun videoFromElement(element: Element): List<Video> {
+        val url = if (element.hasAttr("data-src")) element.attr("data-src") else element.attr("src")
+        return if (url.isNotEmpty()) {
+            listOf(Video(url, "Server Player", url))
+        } else {
+            emptyList()
         }
-        return videoList
     }
+
+    override fun videoUrlParse(document: Document): String = throw Exception("Not used")
 }
