@@ -54,7 +54,8 @@ class Toonstream : ParsedAnimeHttpSource() {
     }
 
     override fun videoListParse(response: okhttp3.Response): List<Video> {
-        val document = Jsoup.parse(response.body.string())
+        val htmlContent = response.body?.string() ?: ""
+        val document = Jsoup.parse(htmlContent)
         val videoList = mutableListOf<Video>()
         document.select("iframe").forEach { element ->
             val url = if (element.hasAttr("data-src")) element.attr("data-src") else element.attr("src")
