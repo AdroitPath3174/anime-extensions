@@ -1,80 +1,180 @@
 package eu.kanade.tachiyomi.animeextension.en.toonstream
 
-import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimesPage
-import eu.kanade.tachiyomi.animesource.model.SAnime
-import eu.kanade.tachiyomi.animesource.model.SEpisode
-import eu.kanade.tachiyomi.animesource.model.Video
+import android.util.Base64
+import aniyomi.lib.doodextractor.DoodExtractor
+import aniyomi.lib.filemoonextractor.FilemoonExtractor
+import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
+import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
+import aniyomi.lib.okruextractor.OkruExtractor
+import aniyomi.lib.streamlareextractor.StreamlareExtractor
+import aniyomi.lib.streamwishextractor.StreamWishExtractor
+import eu.kanade.tachiyomi.animesource.model.*
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.utils.bodyString
+import keiyoushi.utils.parallelCatchingFlatMap
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 
-class Toonstream : AnimeHttpSource() {
+class ToonStream : AnimeHttpSource() {
 
-    override val name = "Toonstream"
+    override val name = "ToonStream"
     override val baseUrl = "https://toonstream.vip"
     override val lang = "en"
     override val supportsLatest = true
 
-    // --- Popular Anime ---
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/page/$page/", headers)
+    override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        .set("Referer", "$baseUrl/")
 
+    // Extractors (same as AllAnime)
+    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
+    private val doodExtractor by lazy { DoodExtractor(client) }
+    private val okruExtractor by lazy { OkruExtractor(client) }
+    private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
+    private val streamlareExtractor by lazy { StreamlareExtractor(client) }
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
+    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
+
+    // ================= Popular / Latest / Search =================
+    override fun popularAnimeRequest(page: Int): Request {
+        val url = if (page == 1) "$baseUrl/home/" else "$baseUrl/home/page/$page/"
+        return GET(url, headers)
+    }
     override fun popularAnimeParse(response: Response): AnimesPage {
-        val document = Jsoup.parse(response.body.string())
-        val elements = document.select("article.item")
-        val animeList = elements.map { element ->
+        val doc = Jsoup.parse(response.bodyString())
+        val elements = doc.select("article.item")
+        val animeList = elements.map { el ->
             SAnime.create().apply {
-                setUrlWithoutDomain(element.select("a").attr("href"))
-                title = element.select("h3").text()
-                thumbnail_url = element.select("img").attr("src")
+                title = el.select("h3 a").text()
+                thumbnail_url = el.select("img").first()?.attr("src") ?: ""
+                url = el.select("a").first()?.attr("href") ?: ""
             }
         }
-        val hasNextPage = document.select("div.pagination a.next").first() != null
-        return AnimesPage(animeList, hasNextPage)
+        return AnimesPage(animeList, doc.select("a.next").isNotEmpty())
     }
 
-    // --- Search Anime ---
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
-        GET("$baseUrl/page/$page/?s=$query", headers)
-
-    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
-
-    // --- Latest Updates ---
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/episodes/page/$page/", headers)
-
+    override fun latestUpdatesRequest(page: Int): Request {
+        val url = if (page == 1) "$baseUrl/episodes/" else "$baseUrl/episodes/page/$page/"
+        return GET(url, headers)
+    }
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    // --- Anime Details ---
-    override fun animeDetailsParse(response: Response): SAnime {
-        val document = Jsoup.parse(response.body.string())
-        val anime = SAnime.create()
-        anime.title = document.select("h1").text()
-        anime.description = document.select("div.wp-content p").text()
-        return anime
-    }
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
+        GET("$baseUrl/?s=$query&page=$page", headers)
+    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    // --- Episode List ---
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = Jsoup.parse(response.body.string())
-        return document.select("ul.episodios li").map { element ->
-            SEpisode.create().apply {
-                setUrlWithoutDomain(element.select("a").attr("href"))
-                name = element.select("div.episodiotitle a").text()
+    // ================= Details =================
+    override fun animeDetailsRequest(anime: SAnime): Request = GET(anime.url, headers)
+    override fun animeDetailsParse(response: Response): SAnime {
+        val doc = Jsoup.parse(response.bodyString())
+        return SAnime.create().apply {
+            genre = doc.select("span.genres a").joinToString(", ") { it.text() }
+            description = doc.select("div.description p").first()?.text() ?: ""
+            status = when {
+                doc.text().contains("Ongoing") -> SAnime.ONGOING
+                else -> SAnime.COMPLETED
             }
         }
     }
 
-    // --- Video Extraction ---
-    override fun videoListParse(response: Response): List<Video> {
-        val document = Jsoup.parse(response.body.string())
-        return document.select("iframe").mapNotNull { element ->
-            val url = if (element.hasAttr("data-src")) element.attr("data-src") else element.attr("src")
-            if (url.isNotEmpty()) {
-                Video(url, "Server Player", url)
-            } else {
-                null
+    // ================= Episodes (all seasons) =================
+    override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
+    override fun episodeListParse(response: Response): List<SEpisode> {
+        val doc = Jsoup.parse(response.bodyString())
+        val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
+        if (seasonLinks.isEmpty()) return emptyList()
+        val postId = seasonLinks.first().attr("data-post")
+        val maxSeason = seasonLinks.size
+        val all = mutableListOf<SEpisode>()
+        for (season in 1..maxSeason) {
+            val body = "action=action_change_seas&season=$season&post=$postId"
+            val req = okhttp3.Request.Builder()
+                .url("$baseUrl/wp-admin/admin-ajax.php")
+                .headers(headers)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .post(okhttp3.RequestBody.create(
+                    okhttp3.MediaType.parse("application/x-www-form-urlencoded")!!, body))
+                .build()
+            kotlin.runCatching {
+                val json = client.newCall(req).awaitSuccess().bodyString().parseAs<JsonObject>()
+                Jsoup.parse(json["html"]!!.jsonPrimitive.content)
+                    .select("article.post.episodes a.lnk-blk")
+                    .forEachIndexed { i, a ->
+                        all.add(SEpisode.create().apply {
+                            episode_number = (i + 1).toFloat()
+                            name = "S${season}E${i + 1}"
+                            url = a.attr("href")
+                        })
+                    }
+            }
+        }
+        return all
+    }
+
+    // ================= Video (pure HTTP extractors) =================
+    override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
+
+    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+        val body = client.newCall(videoListRequest(episode)).awaitSuccess().bodyString()
+        val doc = Jsoup.parse(body)
+
+        // 1. Find the obfuscated script (contains the _ml array)
+        val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src") ?: return emptyList()
+        val script1 = client.newCall(GET(scriptSrc, headers)).awaitSuccess().bodyString()
+
+        // 2. Decode _ml array to get the 2nd script URL
+        val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
+        val mlMatch = mlRegex.find(script1) ?: return emptyList()
+        val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
+        val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
+        val secondScriptUrl = String(Base64.decode(joined, Base64.DEFAULT))
+
+        // 3. Fetch the 2nd script (e.g., from 21wiz.com)
+        val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
+
+        // 4. Look for known video host URLs inside the 2nd script
+        val hosterPatterns = listOf(
+            "vidstream" to "gogo",
+            "gogo" to "gogo",
+            "dood" to "dood",
+            "ok.ru" to "okru",
+            "okru" to "okru",
+            "mp4upload" to "mp4upload",
+            "streamlare" to "streamlare",
+            "filemoon" to "filemoon",
+            "moonplayer" to "filemoon",
+            "streamwish" to "streamwish",
+            "wish" to "streamwish"
+        )
+
+        // Extract all strings that look like URLs (starting with // or https://)
+        val urlRegex = Regex("""(?:"|')((?:https?:)?//[^"'\s]+)(?:"|')""")
+        val allUrls = urlRegex.findAll(script2).map { it.groupValues[1] }.toList()
+
+        // Try each URL with known hosters, using the corresponding extractor
+        val candidates = allUrls.mapNotNull { url ->
+            val lower = url.lowercase()
+            val match = hosterPatterns.firstOrNull { lower.contains(it.first) }
+            if (match != null) Pair(url, match.second) else null
+        }
+
+        return candidates.parallelCatchingFlatMap { (url, hoster) ->
+            when (hoster) {
+                "gogo" -> gogoStreamExtractor.videosFromUrl(url)
+                "dood" -> doodExtractor.videosFromUrl(url)
+                "okru" -> okruExtractor.videosFromUrl(url)
+                "mp4upload" -> mp4uploadExtractor.videosFromUrl(url, headers)
+                "streamlare" -> streamlareExtractor.videosFromUrl(url)
+                "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
+                "streamwish" -> streamwishExtractor.videosFromUrl(url, videoNameGen = { "StreamWish:$it" })
+                else -> emptyList()
             }
         }
     }
