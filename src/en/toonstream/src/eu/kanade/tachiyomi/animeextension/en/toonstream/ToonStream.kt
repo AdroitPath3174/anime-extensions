@@ -194,15 +194,15 @@ class ToonStream : AnimeHttpSource() {
 
         return candidates.parallelCatchingFlatMap { (url, hoster) ->
             when (hoster) {
-                "gogo" -> gogoStreamExtractor.videosFromUrl(url)
-                "dood" -> doodExtractor.videosFromUrl(url)
-                "okru" -> okruExtractor.videosFromUrl(url)
-                "mp4upload" -> mp4uploadExtractor.videosFromUrl(url, headers)
-                "streamlare" -> streamlareExtractor.videosFromUrl(url)
-                "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
-                "streamwish" -> streamwishExtractor.videosFromUrl(
+                "gogo" -> gogoStreamExtractor.getVideosFromUrl(url)
+                "dood" -> doodExtractor.getVideosFromUrl(url)
+                "okru" -> okruExtractor.getVideosFromUrl(url)
+                "mp4upload" -> mp4uploadExtractor.getVideosFromUrl(url, headers)
+                "streamlare" -> streamlareExtractor.getVideosFromUrl(url)
+                "filemoon" -> filemoonExtractor.getVideosFromUrl(url, prefix = "Filemoon:")
+                "streamwish" -> streamwishExtractor.getVideosFromUrl(
                     url,
-                    videoNameGen = { "StreamWish:$it" },
+                    videoNameGen = { quality -> "StreamWish:$quality" },
                 )
                 else -> emptyList()
             }
