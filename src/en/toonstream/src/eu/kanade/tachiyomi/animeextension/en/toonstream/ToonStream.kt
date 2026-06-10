@@ -8,14 +8,20 @@ import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
-import eu.kanade.tachiyomi.animesource.model.*
+import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -29,10 +35,14 @@ class ToonStream : AnimeHttpSource() {
     override val supportsLatest = true
 
     override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        )
         .set("Referer", "$baseUrl/")
 
-    // Extractors (same as AllAnime)
+    // ================= Extractors =================
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
@@ -41,11 +51,12 @@ class ToonStream : AnimeHttpSource() {
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
 
-    // ================= Popular / Latest / Search =================
+    // ================= Popular =================
     override fun popularAnimeRequest(page: Int): Request {
         val url = if (page == 1) "$baseUrl/home/" else "$baseUrl/home/page/$page/"
         return GET(url, headers)
     }
+
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = Jsoup.parse(response.bodyString())
         val elements = doc.select("article.item")
@@ -56,21 +67,32 @@ class ToonStream : AnimeHttpSource() {
                 url = el.select("a").first()?.attr("href") ?: ""
             }
         }
-        return AnimesPage(animeList, doc.select("a.next").isNotEmpty())
+        val hasNext = doc.select("a.next").isNotEmpty()
+        return AnimesPage(animeList, hasNext)
     }
 
+    // ================= Latest Episodes =================
     override fun latestUpdatesRequest(page: Int): Request {
         val url = if (page == 1) "$baseUrl/episodes/" else "$baseUrl/episodes/page/$page/"
         return GET(url, headers)
     }
+
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
-        GET("$baseUrl/?s=$query&page=$page", headers)
+    // ================= Search =================
+    override fun searchAnimeRequest(
+        page: Int,
+        query: String,
+        filters: AnimeFilterList
+    ): Request {
+        return GET("$baseUrl/?s=$query&page=$page", headers)
+    }
+
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     // ================= Details =================
     override fun animeDetailsRequest(anime: SAnime): Request = GET(anime.url, headers)
+
     override fun animeDetailsParse(response: Response): SAnime {
         val doc = Jsoup.parse(response.bodyString())
         return SAnime.create().apply {
@@ -83,63 +105,73 @@ class ToonStream : AnimeHttpSource() {
         }
     }
 
-    // ================= Episodes (all seasons) =================
+    // ================= Episodes (all seasons via AJAX) =================
     override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
+
     override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.isEmpty()) return emptyList()
         val postId = seasonLinks.first().attr("data-post")
         val maxSeason = seasonLinks.size
-        val all = mutableListOf<SEpisode>()
+        val allEpisodes = mutableListOf<SEpisode>()
+
         for (season in 1..maxSeason) {
             val body = "action=action_change_seas&season=$season&post=$postId"
-            val req = okhttp3.Request.Builder()
+            val ajaxReq = okhttp3.Request.Builder()
                 .url("$baseUrl/wp-admin/admin-ajax.php")
                 .headers(headers)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .header("X-Requested-With", "XMLHttpRequest")
-                .post(okhttp3.RequestBody.create(
-                    okhttp3.MediaType.parse("application/x-www-form-urlencoded")!!, body))
+                .post(
+                    okhttp3.RequestBody.create(
+                        okhttp3.MediaType.parse("application/x-www-form-urlencoded")!!,
+                        body
+                    )
+                )
                 .build()
             kotlin.runCatching {
-                val json = client.newCall(req).awaitSuccess().bodyString().parseAs<JsonObject>()
-                Jsoup.parse(json["html"]!!.jsonPrimitive.content)
-                    .select("article.post.episodes a.lnk-blk")
-                    .forEachIndexed { i, a ->
-                        all.add(SEpisode.create().apply {
-                            episode_number = (i + 1).toFloat()
-                            name = "S${season}E${i + 1}"
+                val jsonString = client.newCall(ajaxReq).awaitSuccess().bodyString()
+                val jsonObj = jsonString.parseAs<JsonObject>()
+                val html = jsonObj["html"]?.jsonPrimitive?.content ?: return@runCatching
+                val fragment = Jsoup.parse(html)
+                fragment.select("article.post.episodes a.lnk-blk").forEachIndexed { idx, a ->
+                    allEpisodes.add(
+                        SEpisode.create().apply {
+                            episode_number = (idx + 1).toFloat()
+                            name = "S${season}E${idx + 1}"
                             url = a.attr("href")
-                        })
-                    }
+                        }
+                    )
+                }
             }
         }
-        return all
+        return allEpisodes
     }
 
-    // ================= Video (pure HTTP extractors) =================
+    // ================= Video Extraction (pure HTTP) =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val body = client.newCall(videoListRequest(episode)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(body)
 
-        // 1. Find the obfuscated script (contains the _ml array)
-        val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src") ?: return emptyList()
+        // 1. Find the obfuscated script (the one with the _ml array)
+        val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
+            ?: return emptyList()
         val script1 = client.newCall(GET(scriptSrc, headers)).awaitSuccess().bodyString()
 
-        // 2. Decode _ml array to get the 2nd script URL
+        // 2. Decode the _ml array to obtain the second script URL
         val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
         val mlMatch = mlRegex.find(script1) ?: return emptyList()
         val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
         val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
         val secondScriptUrl = String(Base64.decode(joined, Base64.DEFAULT))
 
-        // 3. Fetch the 2nd script (e.g., from 21wiz.com)
+        // 3. Fetch the second script (e.g., from 21wiz.com)
         val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
 
-        // 4. Look for known video host URLs inside the 2nd script
+        // 4. Extract all URLs from the second script and match them with known hosters
         val hosterPatterns = listOf(
             "vidstream" to "gogo",
             "gogo" to "gogo",
@@ -154,11 +186,9 @@ class ToonStream : AnimeHttpSource() {
             "wish" to "streamwish"
         )
 
-        // Extract all strings that look like URLs (starting with // or https://)
         val urlRegex = Regex("""(?:"|')((?:https?:)?//[^"'\s]+)(?:"|')""")
         val allUrls = urlRegex.findAll(script2).map { it.groupValues[1] }.toList()
 
-        // Try each URL with known hosters, using the corresponding extractor
         val candidates = allUrls.mapNotNull { url ->
             val lower = url.lowercase()
             val match = hosterPatterns.firstOrNull { lower.contains(it.first) }
@@ -173,7 +203,10 @@ class ToonStream : AnimeHttpSource() {
                 "mp4upload" -> mp4uploadExtractor.videosFromUrl(url, headers)
                 "streamlare" -> streamlareExtractor.videosFromUrl(url)
                 "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
-                "streamwish" -> streamwishExtractor.videosFromUrl(url, videoNameGen = { "StreamWish:$it" })
+                "streamwish" -> streamwishExtractor.videosFromUrl(
+                    url,
+                    videoNameGen = { "StreamWish:$it" }
+                )
                 else -> emptyList()
             }
         }
