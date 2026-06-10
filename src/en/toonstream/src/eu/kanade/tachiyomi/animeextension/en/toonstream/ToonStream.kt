@@ -22,7 +22,6 @@ import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -38,7 +37,7 @@ class ToonStream : AnimeHttpSource() {
         .set(
             "User-Agent",
             "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         )
         .set("Referer", "$baseUrl/")
 
@@ -83,10 +82,8 @@ class ToonStream : AnimeHttpSource() {
     override fun searchAnimeRequest(
         page: Int,
         query: String,
-        filters: AnimeFilterList
-    ): Request {
-        return GET("$baseUrl/?s=$query&page=$page", headers)
-    }
+        filters: AnimeFilterList,
+    ): Request = GET("$baseUrl/?s=$query&page=$page", headers)
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
@@ -126,8 +123,8 @@ class ToonStream : AnimeHttpSource() {
                 .post(
                     okhttp3.RequestBody.create(
                         okhttp3.MediaType.parse("application/x-www-form-urlencoded")!!,
-                        body
-                    )
+                        body,
+                    ),
                 )
                 .build()
             kotlin.runCatching {
@@ -141,7 +138,7 @@ class ToonStream : AnimeHttpSource() {
                             episode_number = (idx + 1).toFloat()
                             name = "S${season}E${idx + 1}"
                             url = a.attr("href")
-                        }
+                        },
                     )
                 }
             }
@@ -183,7 +180,7 @@ class ToonStream : AnimeHttpSource() {
             "filemoon" to "filemoon",
             "moonplayer" to "filemoon",
             "streamwish" to "streamwish",
-            "wish" to "streamwish"
+            "wish" to "streamwish",
         )
 
         val urlRegex = Regex("""(?:"|')((?:https?:)?//[^"'\s]+)(?:"|')""")
@@ -205,7 +202,7 @@ class ToonStream : AnimeHttpSource() {
                 "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
                 "streamwish" -> streamwishExtractor.videosFromUrl(
                     url,
-                    videoNameGen = { "StreamWish:$it" }
+                    videoNameGen = { "StreamWish:$it" },
                 )
                 else -> emptyList()
             }
