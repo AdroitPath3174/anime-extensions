@@ -19,6 +19,9 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -102,48 +105,45 @@ class ToonStream : AnimeHttpSource() {
         }
     }
 
-    // ================= Episodes (all seasons via AJAX) =================
-    override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
-
-    override fun episodeListParse(response: Response): List<SEpisode> {
+    // ================= Episodes (all seasons) =================
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val response = client.newCall(GET(anime.url, headers)).awaitSuccess()
         val doc = Jsoup.parse(response.bodyString())
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.isEmpty()) return emptyList()
-        val postId = seasonLinks.first().attr("data-post")
+        val postId = seasonLinks.first()?.attr("data-post") ?: return emptyList()
         val maxSeason = seasonLinks.size
-        val allEpisodes = mutableListOf<SEpisode>()
 
-        for (season in 1..maxSeason) {
-            val body = "action=action_change_seas&season=$season&post=$postId"
-            val ajaxReq = okhttp3.Request.Builder()
-                .url("$baseUrl/wp-admin/admin-ajax.php")
-                .headers(headers)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .post(
-                    okhttp3.RequestBody.create(
-                        okhttp3.MediaType.parse("application/x-www-form-urlencoded")!!,
-                        body,
-                    ),
-                )
-                .build()
-            kotlin.runCatching {
-                val jsonString = client.newCall(ajaxReq).awaitSuccess().bodyString()
-                val jsonObj = jsonString.parseAs<JsonObject>()
-                val html = jsonObj["html"]?.jsonPrimitive?.content ?: return@runCatching
-                val fragment = Jsoup.parse(html)
-                fragment.select("article.post.episodes a.lnk-blk").forEachIndexed { idx, a ->
-                    allEpisodes.add(
+        return coroutineScope {
+            (1..maxSeason).map { season ->
+                async {
+                    val body = "action=action_change_seas&season=$season&post=$postId"
+                    val ajaxReq = Request.Builder()
+                        .url("$baseUrl/wp-admin/admin-ajax.php")
+                        .headers(headers)
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .post(
+                            okhttp3.RequestBody.create(
+                                "application/x-www-form-urlencoded".toMediaType(),
+                                body,
+                            ),
+                        )
+                        .build()
+                    val ajaxResponse = client.newCall(ajaxReq).awaitSuccess()
+                    val json = ajaxResponse.bodyString().parseAs<JsonObject>()
+                    val html = json["html"]?.jsonPrimitive?.content ?: ""
+                    val fragment = Jsoup.parse(html)
+                    fragment.select("article.post.episodes a.lnk-blk").mapIndexed { idx, a ->
                         SEpisode.create().apply {
                             episode_number = (idx + 1).toFloat()
                             name = "S${season}E${idx + 1}"
                             url = a.attr("href")
-                        },
-                    )
+                        }
+                    }
                 }
-            }
+            }.awaitAll().flatten()
         }
-        return allEpisodes
     }
 
     // ================= Video Extraction (pure HTTP) =================
@@ -194,15 +194,15 @@ class ToonStream : AnimeHttpSource() {
 
         return candidates.parallelCatchingFlatMap { (url, hoster) ->
             when (hoster) {
-                "gogo" -> gogoStreamExtractor.getVideosFromUrl(url)
-                "dood" -> doodExtractor.getVideosFromUrl(url)
-                "okru" -> okruExtractor.getVideosFromUrl(url)
-                "mp4upload" -> mp4uploadExtractor.getVideosFromUrl(url, headers)
-                "streamlare" -> streamlareExtractor.getVideosFromUrl(url)
-                "filemoon" -> filemoonExtractor.getVideosFromUrl(url, prefix = "Filemoon:")
-                "streamwish" -> streamwishExtractor.getVideosFromUrl(
+                "gogo" -> gogoStreamExtractor.videosFromUrl(url)
+                "dood" -> doodExtractor.videosFromUrl(url)
+                "okru" -> okruExtractor.videosFromUrl(url)
+                "mp4upload" -> mp4uploadExtractor.videosFromUrl(url, headers)
+                "streamlare" -> streamlareExtractor.videosFromUrl(url)
+                "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
+                "streamwish" -> streamwishExtractor.videosFromUrl(
                     url,
-                    videoNameGen = { quality -> "StreamWish:$quality" },
+                    videoNameGen = { quality: String -> "StreamWish:$quality" },
                 )
                 else -> emptyList()
             }
