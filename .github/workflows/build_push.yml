@@ -10,7 +10,6 @@ on:
       - '!.github/**'
       - '.github/scripts/**'
       - '.github/workflows/build_push.yml'
-  # Manual trigger
   workflow_dispatch:
 
 permissions: {}
@@ -58,10 +57,6 @@ jobs:
           files_separator: " "
           safe_output: false
 
-        # This step is going to commit, but this will not trigger another workflow.
-        # If any changes to lib/ caused on master branch, bump the extensions that uses the modified lib.
-        # If any changes caused by the merge commit, skip this step because versions should already pumped with that merge.
-        # But that should be avoided because our own extensions may not be bumped.
       - name: Bump extensions that use a modified lib
         if: steps.modified-libs.outputs.any_changed == 'true' && github.repository == 'yuzono/anime-extensions'
         env:
@@ -78,7 +73,7 @@ jobs:
         uses: nrwl/nx-set-shas@afb73a62d26e41464e9254689e1fd6122ee683c1 # v5.0.1
         with:
           main-branch-name: ${{ github.ref_name }}
-          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 # empty tree
+          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
 
       - id: generate-matrices
         name: Create output matrices
@@ -111,34 +106,32 @@ jobs:
         with:
           cache-read-only: ${{ matrix.chunk.number > 1 }}
 
-      # ----- Signing key step REMOVED (not needed for your fork) -----
-
       - name: Build extensions (${{ matrix.chunk.number }})
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-          # ALIAS, KEY_STORE_PASSWORD, KEY_PASSWORD are intentionally removed
           MEGACLOUD_API: ${{ secrets.MEGACLOUD_API }}
           KISSKH_API: ${{ secrets.KISSKH_API }}
           KISSKH_SUB_API: ${{ secrets.KISSKH_SUB_API }}
           KAISVA: ${{ secrets.KAISVA }}
           TMDB_API: ${{ secrets.TMDB_API }}
-        run: 
+        run: |
           ./gradlew $MODULES
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-          with:
+        with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: "**/*.apk"
           retention-days: 1
 
       - name: Clean up CI files
-        run: rm signingkey.jks   # This line can remain; it won't fail if the file doesn't exist (rm -f signingkey.jks would be safer)
-        continue-on-error: true   # Add this to prevent failure if the file is missing
+        run: rm -f signingkey.jks
+        continue-on-error: true
 
   publish:
     name: Publish extension repo
     needs: [prepare, build]
+    if: github.repository == 'yuzono/anime-extensions'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -192,5 +185,3 @@ jobs:
         with:
           message: "${{ needs.prepare.outputs.latestCommitMessage }}"
           cwd: "./repo"
-          # committer_name: github-actions[bot]
-          # committer_email: github-actions[bot]@users.noreply.github.com
