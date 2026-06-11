@@ -1,0 +1,38 @@
+name: Build ToonStream Extension
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/en/toonstream/**'
+      - 'lib/**'
+      - 'core/**'
+  workflow_dispatch:   # allows manual run
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Java
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e # v6.1.0
+
+      - name: Build extension
+        run: ./gradlew :src:en:toonstream:assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ToonStream-APK
+          path: "**/*.apk"
+          retention-days: 7
