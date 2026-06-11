@@ -3,8 +3,7 @@
     package="eu.kanade.tachiyomi.animeextension.en.toonstream">
 
     <application
-        android:allowBackup="false"
-        android:label="ToonStream">
+        android:allowBackup="false">
 
         <service
             android:name="eu.kanade.tachiyomi.animeextension.en.toonstream.ToonStream"
