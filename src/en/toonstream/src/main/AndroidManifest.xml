@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="eu.kanade.tachiyomi.animeextension.en.toonstream">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:label="ToonStream">
+
+        <meta-data
+            android:name="tachiyomi.animeextension.class"
+            android:value="eu.kanade.tachiyomi.animeextension.en.toonstream.ToonStream" />
+        <meta-data
+            android:name="tachiyomi.animeextension.nsfw"
+            android:value="false" />
 
         <service
             android:name="eu.kanade.tachiyomi.animeextension.en.toonstream.ToonStream"
