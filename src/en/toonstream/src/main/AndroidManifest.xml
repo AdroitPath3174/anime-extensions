@@ -11,18 +11,11 @@
             android:name="tachiyomi.animeextension.class"
             android:value="eu.kanade.tachiyomi.animeextension.en.toonstream.ToonStream"
             tools:replace="android:value" />
+
         <meta-data
             android:name="tachiyomi.animeextension.nsfw"
             android:value="false"
             tools:replace="android:value" />
-
-        <service
-            android:name="eu.kanade.tachiyomi.animeextension.en.toonstream.ToonStream"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="eu.kanade.tachiyomi.animesource.AnimeSource" />
-            </intent-filter>
-        </service>
 
     </application>
 </manifest>
