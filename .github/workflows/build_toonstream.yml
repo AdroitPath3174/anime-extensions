@@ -29,7 +29,7 @@ jobs:
 
       - name: Generate debug keystore
         run: |
-          keytool -genkey -v -keystore debug.keystore -alias androiddebugkey \
+          keytool -genkey -v -keystore src/en/toonstream/debug.keystore -alias androiddebugkey \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android -keypass android \
             -dname "CN=Android Debug,O=Android,C=US"
@@ -37,7 +37,7 @@ jobs:
       - name: Build signed APK
         run: |
           ./gradlew :src:en:toonstream:assembleRelease \
-            -Pandroid.injected.signing.store.file=debug.keystore \
+            -Pandroid.injected.signing.store.file=src/en/toonstream/debug.keystore \
             -Pandroid.injected.signing.store.password=android \
             -Pandroid.injected.signing.key.alias=androiddebugkey \
             -Pandroid.injected.signing.key.password=android
