@@ -19,12 +19,10 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -106,44 +104,46 @@ class ToonStream : AnimeHttpSource() {
     }
 
     // ================= Episodes (all seasons) =================
-    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val response = client.newCall(GET(anime.url, headers)).awaitSuccess()
+    override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
+
+    override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.isEmpty()) return emptyList()
         val postId = seasonLinks.first()?.attr("data-post") ?: return emptyList()
         val maxSeason = seasonLinks.size
+        val allEpisodes = mutableListOf<SEpisode>()
 
-        return coroutineScope {
-            (1..maxSeason).map { season ->
-                async {
-                    val body = "action=action_change_seas&season=$season&post=$postId"
-                    val ajaxReq = Request.Builder()
-                        .url("$baseUrl/wp-admin/admin-ajax.php")
-                        .headers(headers)
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .post(
-                            okhttp3.RequestBody.create(
-                                "application/x-www-form-urlencoded".toMediaType(),
-                                body,
-                            ),
-                        )
-                        .build()
-                    val ajaxResponse = client.newCall(ajaxReq).awaitSuccess()
-                    val json = ajaxResponse.bodyString().parseAs<JsonObject>()
-                    val html = json["html"]?.jsonPrimitive?.content ?: ""
-                    val fragment = Jsoup.parse(html)
-                    fragment.select("article.post.episodes a.lnk-blk").mapIndexed { idx, a ->
-                        SEpisode.create().apply {
-                            episode_number = (idx + 1).toFloat()
-                            name = "S${season}E${idx + 1}"
-                            url = a.attr("href")
-                        }
-                    }
-                }
-            }.awaitAll().flatten()
+        for (season in 1..maxSeason) {
+            val body = "action=action_change_seas&season=$season&post=$postId"
+            val ajaxReq = Request.Builder()
+                .url("$baseUrl/wp-admin/admin-ajax.php")
+                .headers(headers)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .post(
+                    okhttp3.RequestBody.create(
+                        "application/x-www-form-urlencoded".toMediaType(),
+                        body,
+                    ),
+                )
+                .build()
+            val ajaxResponse = client.newCall(ajaxReq).execute()
+            val jsonString = ajaxResponse.bodyString()
+            val jsonObj = jsonString.parseAs<JsonObject>()
+            val html = jsonObj["html"]?.jsonPrimitive?.content ?: continue
+            val fragment = Jsoup.parse(html)
+            fragment.select("article.post.episodes a.lnk-blk").forEachIndexed { idx, a ->
+                allEpisodes.add(
+                    SEpisode.create().apply {
+                        episode_number = (idx + 1).toFloat()
+                        name = "S${season}E${idx + 1}"
+                        url = a.attr("href")
+                    },
+                )
+            }
         }
+        return allEpisodes
     }
 
     // ================= Video Extraction (pure HTTP) =================
