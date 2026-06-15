@@ -1,0 +1,17 @@
+ext {
+    extName = 'ToonStream'
+    extClass = '.ToonStream'
+    extVersionCode = 1
+}
+
+apply plugin: "kei.plugins.extension.legacy"
+
+dependencies {
+    implementation(project(':lib:gogostreamextractor'))
+    implementation(project(':lib:doodextractor'))
+    implementation(project(':lib:okruextractor'))
+    implementation(project(':lib:mp4uploadextractor'))
+    implementation(project(':lib:streamlareextractor'))
+    implementation(project(':lib:filemoonextractor'))
+    implementation(project(':lib:streamwishextractor'))
+}
