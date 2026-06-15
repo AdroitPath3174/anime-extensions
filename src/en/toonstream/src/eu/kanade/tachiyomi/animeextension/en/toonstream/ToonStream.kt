@@ -88,7 +88,9 @@ class ToonStream : AnimeHttpSource() {
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun searchAnimeRequest(
-        page: Int, query: String, filters: AnimeFilterList,
+        page: Int,
+        query: String,
+        filters: AnimeFilterList,
     ): Request = GET("$baseUrl/?s=$query&page=$page", headers)
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
@@ -121,14 +123,13 @@ class ToonStream : AnimeHttpSource() {
                     episode_number = (idx + 1).toFloat()
                     name = a.parent()?.select("h2.entry-title")?.text() ?: "Episode ${idx + 1}"
                     url = a.attr("href")
-                }
+                },
             )
         }
 
         // 2. Find how many seasons exist
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.isEmpty() || seasonLinks.size == 1) {
-            // Only one season present, we already have its episodes
             return allEpisodes
         }
 
@@ -155,7 +156,6 @@ class ToonStream : AnimeHttpSource() {
                 val responseBody = ajaxResponse.bodyString()
                 var html: Document? = null
 
-                // Try to parse as JSON first, then fallback to plain HTML
                 try {
                     val jsonObj = responseBody.parseAs<JsonObject>()
                     val htmlStr = jsonObj["html"]?.jsonPrimitive?.content
@@ -166,11 +166,9 @@ class ToonStream : AnimeHttpSource() {
                     // Not JSON, treat as HTML directly
                 }
                 if (html == null) {
-                    // Fallback: use the response as HTML
                     html = Jsoup.parse(responseBody)
                 }
 
-                // 4. Extract episode links from the parsed content
                 val episodeLinks = html.select("article.post.episodes a.lnk-blk")
                 episodeLinks.forEachIndexed { idx, a ->
                     allEpisodes.add(
@@ -179,11 +177,10 @@ class ToonStream : AnimeHttpSource() {
                             name = a.parent()?.select("h2.entry-title")?.text()
                                 ?: "Season $season Episode ${idx + 1}"
                             url = a.attr("href")
-                        }
+                        },
                     )
                 }
             } catch (e: Exception) {
-                // If a season fails, continue to the next one
                 e.printStackTrace()
             }
         }
@@ -191,7 +188,7 @@ class ToonStream : AnimeHttpSource() {
         return allEpisodes
     }
 
-    // ================= Video Extraction (unchanged) =================
+    // ================= Video Extraction =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
