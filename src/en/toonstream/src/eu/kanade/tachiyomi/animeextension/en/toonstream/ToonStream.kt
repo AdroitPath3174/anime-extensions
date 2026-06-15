@@ -26,6 +26,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 class ToonStream : AnimeHttpSource() {
 
@@ -42,7 +43,6 @@ class ToonStream : AnimeHttpSource() {
         )
         .set("Referer", "$baseUrl/")
 
-    // ================= Extractors =================
     private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
     private val doodExtractor by lazy { DoodExtractor(client) }
     private val okruExtractor by lazy { OkruExtractor(client) }
@@ -50,6 +50,12 @@ class ToonStream : AnimeHttpSource() {
     private val streamlareExtractor by lazy { StreamlareExtractor(client) }
     private val filemoonExtractor by lazy { FilemoonExtractor(client) }
     private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
+
+    private fun fixUrl(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http") -> url
+        else -> url
+    }
 
     // ================= Popular =================
     override fun popularAnimeRequest(page: Int): Request {
@@ -59,8 +65,6 @@ class ToonStream : AnimeHttpSource() {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = Jsoup.parse(response.bodyString())
-        // The homepage lists series in <ul class="post-lst"> inside the "Latest Series" section.
-        // We extract all <li> items that contain a link to /series/
         val elements = doc.select("ul.post-lst li").filter { li ->
             li.select("a.lnk-blk[href*=\"/series/\"]").isNotEmpty()
         }
@@ -69,7 +73,7 @@ class ToonStream : AnimeHttpSource() {
             val img = li.selectFirst("figure img")
             SAnime.create().apply {
                 title = li.selectFirst("h2.entry-title")?.text() ?: ""
-                thumbnail_url = img?.attr("src") ?: ""
+                thumbnail_url = fixUrl(img?.attr("src") ?: "")
                 url = link.attr("href")
             }
         }
@@ -77,26 +81,19 @@ class ToonStream : AnimeHttpSource() {
         return AnimesPage(animeList, hasNext)
     }
 
-    // ================= Latest Episodes =================
     override fun latestUpdatesRequest(page: Int): Request {
         val url = if (page == 1) "$baseUrl/episodes/" else "$baseUrl/episodes/page/$page/"
         return GET(url, headers)
     }
-
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    // ================= Search =================
     override fun searchAnimeRequest(
-        page: Int,
-        query: String,
-        filters: AnimeFilterList,
+        page: Int, query: String, filters: AnimeFilterList,
     ): Request = GET("$baseUrl/?s=$query&page=$page", headers)
-
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     // ================= Details =================
     override fun animeDetailsRequest(anime: SAnime): Request = GET(anime.url, headers)
-
     override fun animeDetailsParse(response: Response): SAnime {
         val doc = Jsoup.parse(response.bodyString())
         return SAnime.create().apply {
@@ -114,67 +111,105 @@ class ToonStream : AnimeHttpSource() {
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
-        val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
-        if (seasonLinks.isEmpty()) return emptyList()
-        val postId = seasonLinks.first()?.attr("data-post") ?: return emptyList()
-        val maxSeason = seasonLinks.size
         val allEpisodes = mutableListOf<SEpisode>()
 
-        for (season in 1..maxSeason) {
-            val body = "action=action_change_seas&season=$season&post=$postId"
-            val ajaxReq = Request.Builder()
-                .url("$baseUrl/wp-admin/admin-ajax.php")
-                .headers(headers)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .post(
-                    okhttp3.RequestBody.create(
-                        "application/x-www-form-urlencoded".toMediaType(),
-                        body,
-                    ),
-                )
-                .build()
-            val ajaxResponse = client.newCall(ajaxReq).execute()
-            val jsonString = ajaxResponse.bodyString()
-            val jsonObj = jsonString.parseAs<JsonObject>()
-            val html = jsonObj["html"]?.jsonPrimitive?.content ?: continue
-            val fragment = Jsoup.parse(html)
-            fragment.select("article.post.episodes a.lnk-blk").forEachIndexed { idx, a ->
-                allEpisodes.add(
-                    SEpisode.create().apply {
-                        episode_number = (idx + 1).toFloat()
-                        name = "S${season}E${idx + 1}"
-                        url = a.attr("href")
-                    },
-                )
+        // 1. Extract Season 1 episodes already present in the HTML
+        val initialEpisodes = doc.select("ul#episode_by_temp article.episodes a.lnk-blk")
+        initialEpisodes.forEachIndexed { idx, a ->
+            allEpisodes.add(
+                SEpisode.create().apply {
+                    episode_number = (idx + 1).toFloat()
+                    name = a.parent()?.select("h2.entry-title")?.text() ?: "Episode ${idx + 1}"
+                    url = a.attr("href")
+                }
+            )
+        }
+
+        // 2. Find how many seasons exist
+        val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
+        if (seasonLinks.isEmpty() || seasonLinks.size == 1) {
+            // Only one season present, we already have its episodes
+            return allEpisodes
+        }
+
+        val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
+        val maxSeason = seasonLinks.size
+
+        // 3. Fetch remaining seasons (2..max) via AJAX
+        for (season in 2..maxSeason) {
+            try {
+                val body = "action=action_change_seas&season=$season&post=$postId"
+                val ajaxReq = Request.Builder()
+                    .url("$baseUrl/wp-admin/admin-ajax.php")
+                    .headers(headers)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .post(
+                        okhttp3.RequestBody.create(
+                            "application/x-www-form-urlencoded".toMediaType(),
+                            body,
+                        ),
+                    )
+                    .build()
+                val ajaxResponse = client.newCall(ajaxReq).execute()
+                val responseBody = ajaxResponse.bodyString()
+                var html: Document? = null
+
+                // Try to parse as JSON first, then fallback to plain HTML
+                try {
+                    val jsonObj = responseBody.parseAs<JsonObject>()
+                    val htmlStr = jsonObj["html"]?.jsonPrimitive?.content
+                    if (!htmlStr.isNullOrBlank()) {
+                        html = Jsoup.parse(htmlStr)
+                    }
+                } catch (_: Exception) {
+                    // Not JSON, treat as HTML directly
+                }
+                if (html == null) {
+                    // Fallback: use the response as HTML
+                    html = Jsoup.parse(responseBody)
+                }
+
+                // 4. Extract episode links from the parsed content
+                val episodeLinks = html.select("article.post.episodes a.lnk-blk")
+                episodeLinks.forEachIndexed { idx, a ->
+                    allEpisodes.add(
+                        SEpisode.create().apply {
+                            episode_number = (idx + 1).toFloat()
+                            name = a.parent()?.select("h2.entry-title")?.text()
+                                ?: "Season $season Episode ${idx + 1}"
+                            url = a.attr("href")
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                // If a season fails, continue to the next one
+                e.printStackTrace()
             }
         }
+
         return allEpisodes
     }
 
-    // ================= Video Extraction (pure HTTP) =================
+    // ================= Video Extraction (unchanged) =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val body = client.newCall(videoListRequest(episode)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(body)
 
-        // 1. Find the obfuscated script (the one with the _ml array)
         val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
             ?: return emptyList()
         val script1 = client.newCall(GET(scriptSrc, headers)).awaitSuccess().bodyString()
 
-        // 2. Decode the _ml array to obtain the second script URL
         val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
         val mlMatch = mlRegex.find(script1) ?: return emptyList()
         val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
         val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
         val secondScriptUrl = String(Base64.decode(joined, Base64.DEFAULT))
 
-        // 3. Fetch the second script (e.g., from 21wiz.com)
         val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
 
-        // 4. Extract all URLs from the second script and match them with known hosters
         val hosterPatterns = listOf(
             "vidstream" to "gogo",
             "gogo" to "gogo",
