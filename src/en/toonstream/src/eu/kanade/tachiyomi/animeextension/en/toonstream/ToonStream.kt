@@ -59,12 +59,18 @@ class ToonStream : AnimeHttpSource() {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = Jsoup.parse(response.bodyString())
-        val elements = doc.select("article.item")
-        val animeList = elements.map { el ->
+        // The homepage lists series in <ul class="post-lst"> inside the "Latest Series" section.
+        // We extract all <li> items that contain a link to /series/
+        val elements = doc.select("ul.post-lst li").filter { li ->
+            li.select("a.lnk-blk[href*=\"/series/\"]").isNotEmpty()
+        }
+        val animeList = elements.map { li ->
+            val link = li.selectFirst("a.lnk-blk")!!
+            val img = li.selectFirst("figure img")
             SAnime.create().apply {
-                title = el.select("h3 a").text()
-                thumbnail_url = el.select("img").first()?.attr("src") ?: ""
-                url = el.select("a").first()?.attr("href") ?: ""
+                title = li.selectFirst("h2.entry-title")?.text() ?: ""
+                thumbnail_url = img?.attr("src") ?: ""
+                url = link.attr("href")
             }
         }
         val hasNext = doc.select("a.next").isNotEmpty()
