@@ -27,29 +27,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Generate debug keystore
-        run: |
-          keytool -genkey -v -keystore src/en/toonstream/debug.keystore -alias androiddebugkey \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-      - name: Build signed APK
-        run: |
-          ./gradlew :src:en:toonstream:assembleRelease \
-            -Pandroid.injected.signing.store.file=src/en/toonstream/debug.keystore \
-            -Pandroid.injected.signing.store.password=android \
-            -Pandroid.injected.signing.key.alias=androiddebugkey \
-            -Pandroid.injected.signing.key.password=android
+      - name: Build debug APK
+        run: ./gradlew :src:en:toonstream:assembleDebug
 
       - name: Rename APK to official format
         run: |
-          APK=$(find src/en/toonstream/build/outputs/apk/release -name "*.apk" | head -1)
+          APK=$(find src/en/toonstream/build/outputs/apk/debug -name "*.apk" | head -1)
           mv "$APK" aniyomi-en.toonstream-v1.0.apk
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: ToonStream-Signed
+          name: ToonStream-Debug
           path: aniyomi-en.toonstream-v1.0.apk
           retention-days: 7
