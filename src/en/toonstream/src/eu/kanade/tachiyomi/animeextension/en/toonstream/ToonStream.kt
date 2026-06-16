@@ -11,6 +11,7 @@ import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
+import eu.kanade.tachiyomi.animesource.Aniyomi
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -22,7 +23,9 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -202,51 +205,53 @@ class ToonStream : AnimeHttpSource() {
         }
         if (httpVideos.isNotEmpty()) return httpVideos
 
-        return suspendCancellableCoroutine { cont ->
-            val webView = WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        view?.postDelayed({
-                            view.evaluateJavascript(
-                                "(function(){" +
-                                    "var v=document.querySelector('video');" +
-                                    "if(v&&v.src)return v.src;" +
-                                    "var ifr=document.querySelector('iframe');" +
-                                    "if(ifr)return ifr.src;" +
-                                    "return '';" +
-                                    "})();",
-                            ) { result ->
-                                val videoUrl = result.trim('"')
-                                if (videoUrl.isNotEmpty() &&
-                                    (videoUrl.endsWith(".m3u8") || videoUrl.endsWith(".mp4"))
-                                ) {
-                                    val video = Video(videoUrl, "Auto", videoUrl)
-                                    if (cont.isActive) cont.resume(listOf(video))
-                                } else {
-                                    view.postDelayed({
-                                        view.evaluateJavascript(
-                                            "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();",
-                                        ) { retryResult ->
-                                            val retryUrl = retryResult.trim('"')
-                                            if (retryUrl.isNotEmpty()) {
-                                                val video = Video(retryUrl, "Auto", retryUrl)
-                                                if (cont.isActive) cont.resume(listOf(video))
-                                            } else {
-                                                if (cont.isActive) cont.resume(emptyList())
+        return withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { cont ->
+                val webView = WebView(Aniyomi.instance).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            view?.postDelayed({
+                                view.evaluateJavascript(
+                                    "(function(){" +
+                                        "var v=document.querySelector('video');" +
+                                        "if(v&&v.src)return v.src;" +
+                                        "var ifr=document.querySelector('iframe');" +
+                                        "if(ifr)return ifr.src;" +
+                                        "return '';" +
+                                        "})();",
+                                ) { result ->
+                                    val videoUrl = result.trim('"')
+                                    if (videoUrl.isNotEmpty() &&
+                                        (videoUrl.endsWith(".m3u8") || videoUrl.endsWith(".mp4"))
+                                    ) {
+                                        val video = Video(videoUrl, "Auto", videoUrl)
+                                        if (cont.isActive) cont.resume(listOf(video))
+                                    } else {
+                                        view.postDelayed({
+                                            view.evaluateJavascript(
+                                                "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();",
+                                            ) { retryResult ->
+                                                val retryUrl = retryResult.trim('"')
+                                                if (retryUrl.isNotEmpty()) {
+                                                    val video = Video(retryUrl, "Auto", retryUrl)
+                                                    if (cont.isActive) cont.resume(listOf(video))
+                                                } else {
+                                                    if (cont.isActive) cont.resume(emptyList())
+                                                }
                                             }
-                                        }
-                                    }, 5000)
+                                        }, 5000)
+                                    }
                                 }
-                            }
-                        }, 8000)
+                            }, 8000)
+                        }
                     }
+                    loadUrl(episode.url)
                 }
-                loadUrl(episode.url)
+                cont.invokeOnCancellation { webView.destroy() }
             }
-            cont.invokeOnCancellation { webView.destroy() }
         }
     }
 
