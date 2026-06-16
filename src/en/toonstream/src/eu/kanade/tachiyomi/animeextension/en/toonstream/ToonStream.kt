@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.en.toonstream
 
 import android.annotation.SuppressLint
+import android.app.Application
 import android.util.Base64
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -206,7 +207,7 @@ class ToonStream : AnimeHttpSource() {
 
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
-                val ctx = this@ToonStream.context // <-- corrected spacing
+                val ctx = getApplicationContext()
                 val webView = WebView(ctx).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
@@ -252,6 +253,22 @@ class ToonStream : AnimeHttpSource() {
                 }
                 cont.invokeOnCancellation { webView.destroy() }
             }
+        }
+    }
+
+    /**
+     * Get the global Application context using reflection.
+     * This is a stable backdoor that works without any special imports.
+     */
+    @Suppress("PrivateApi")
+    private fun getApplicationContext(): android.content.Context {
+        return try {
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
+            currentApplicationMethod.invoke(null) as Application
+        } catch (e: Exception) {
+            // Extremely unlikely to fail – fallback to null is not possible, so we throw
+            throw IllegalStateException("Could not get Application context via reflection", e)
         }
     }
 
