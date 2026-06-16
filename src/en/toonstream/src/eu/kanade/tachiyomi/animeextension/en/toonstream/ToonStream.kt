@@ -206,7 +206,7 @@ class ToonStream : AnimeHttpSource() {
 
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
-                val ctx = this@ToonStream.context   // <-- correct access, no conflict
+                val ctx = this@ToonStream.context // <-- corrected spacing
                 val webView = WebView(ctx).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
