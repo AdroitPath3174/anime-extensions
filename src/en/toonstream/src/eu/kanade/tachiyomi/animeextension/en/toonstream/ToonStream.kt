@@ -261,15 +261,13 @@ class ToonStream : AnimeHttpSource() {
      * This is a stable backdoor that works without any special imports.
      */
     @Suppress("PrivateApi")
-    private fun getApplicationContext(): android.content.Context {
-        return try {
-            val activityThreadClass = Class.forName("android.app.ActivityThread")
-            val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
-            currentApplicationMethod.invoke(null) as Application
-        } catch (e: Exception) {
-            // Extremely unlikely to fail – fallback to null is not possible, so we throw
-            throw IllegalStateException("Could not get Application context via reflection", e)
-        }
+    private fun getApplicationContext(): android.content.Context = try {
+        val activityThreadClass = Class.forName("android.app.ActivityThread")
+        val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
+        currentApplicationMethod.invoke(null) as Application
+    } catch (e: Exception) {
+        // Extremely unlikely to fail – fallback to null is not possible, so we throw
+        throw IllegalStateException("Could not get Application context via reflection", e)
     }
 
     private suspend fun getHttpVideoList(episode: SEpisode): List<Video> {
