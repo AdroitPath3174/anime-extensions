@@ -197,7 +197,6 @@ class ToonStream : AnimeHttpSource() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // Try pure HTTP extraction first
         val httpVideos = try {
             getHttpVideoList(episode)
         } catch (_: Exception) {
@@ -205,10 +204,10 @@ class ToonStream : AnimeHttpSource() {
         }
         if (httpVideos.isNotEmpty()) return httpVideos
 
-        // Fallback: use WebView to capture the token‑protected stream
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
-                val webView = WebView(context()).apply {
+                val ctx = this@ToonStream.context   // <-- correct access, no conflict
+                val webView = WebView(ctx).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false
