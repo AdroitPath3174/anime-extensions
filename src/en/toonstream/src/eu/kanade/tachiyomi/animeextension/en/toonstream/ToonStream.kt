@@ -11,7 +11,6 @@ import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
 import aniyomi.lib.okruextractor.OkruExtractor
 import aniyomi.lib.streamlareextractor.StreamlareExtractor
 import aniyomi.lib.streamwishextractor.StreamWishExtractor
-import eu.kanade.tachiyomi.animesource.Aniyomi
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.SAnime
@@ -174,7 +173,7 @@ class ToonStream : AnimeHttpSource() {
                     html = Jsoup.parse(responseBody)
                 }
 
-                val episodeLinks = html.select("a.lnk-blk[href*=\"/episode/\"]")
+                val episodeLinks = html.select("article.post.episodes a.lnk-blk")
                 episodeLinks.forEachIndexed { idx, a ->
                     allEpisodes.add(
                         SEpisode.create().apply {
@@ -193,11 +192,12 @@ class ToonStream : AnimeHttpSource() {
         return allEpisodes
     }
 
-    // ================= Video Extraction =================
+    // ================= Video Extraction (HTTP + WebView fallback) =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     @SuppressLint("SetJavaScriptEnabled")
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
+        // Try pure HTTP extraction first
         val httpVideos = try {
             getHttpVideoList(episode)
         } catch (_: Exception) {
@@ -205,9 +205,10 @@ class ToonStream : AnimeHttpSource() {
         }
         if (httpVideos.isNotEmpty()) return httpVideos
 
+        // Fallback: use WebView to capture the token‑protected stream
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
-                val webView = WebView(Aniyomi.instance).apply {
+                val webView = WebView(context()).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false
