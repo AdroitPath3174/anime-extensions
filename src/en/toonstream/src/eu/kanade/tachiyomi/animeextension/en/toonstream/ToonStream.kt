@@ -1,6 +1,9 @@
 package eu.kanade.tachiyomi.animeextension.en.toonstream
 
+import android.annotation.SuppressLint
 import android.util.Base64
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import aniyomi.lib.doodextractor.DoodExtractor
 import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
@@ -19,6 +22,7 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -27,6 +31,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import kotlin.coroutines.resume
 
 class ToonStream : AnimeHttpSource() {
 
@@ -57,7 +62,7 @@ class ToonStream : AnimeHttpSource() {
         else -> url
     }
 
-    // ================= Popular =================
+    // ================= Browse (Series + Movies) =================
     override fun popularAnimeRequest(page: Int): Request {
         val url = if (page == 1) "$baseUrl/home/" else "$baseUrl/home/page/$page/"
         return GET(url, headers)
@@ -65,8 +70,10 @@ class ToonStream : AnimeHttpSource() {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = Jsoup.parse(response.bodyString())
+        // Include both series and movies
         val elements = doc.select("ul.post-lst li").filter { li ->
-            li.select("a.lnk-blk[href*=\"/series/\"]").isNotEmpty()
+            val href = li.select("a.lnk-blk").first()?.attr("href") ?: ""
+            href.contains("/series/") || href.contains("/movies/")
         }
         val animeList = elements.map { li ->
             val link = li.selectFirst("a.lnk-blk")!!
@@ -162,14 +169,14 @@ class ToonStream : AnimeHttpSource() {
                     if (!htmlStr.isNullOrBlank()) {
                         html = Jsoup.parse(htmlStr)
                     }
-                } catch (_: Exception) {
-                    // Not JSON, treat as HTML directly
-                }
+                } catch (_: Exception) { }
+
                 if (html == null) {
                     html = Jsoup.parse(responseBody)
                 }
 
-                val episodeLinks = html.select("article.post.episodes a.lnk-blk")
+                // Use a broader selector to catch episode links
+                val episodeLinks = html.select("a.lnk-blk[href*=\"/episode/\"]")
                 episodeLinks.forEachIndexed { idx, a ->
                     allEpisodes.add(
                         SEpisode.create().apply {
@@ -188,11 +195,69 @@ class ToonStream : AnimeHttpSource() {
         return allEpisodes
     }
 
-    // ================= Video Extraction =================
-    override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
-
+    // ================= Video Extraction (WebView fallback) =================
+    @SuppressLint("SetJavaScriptEnabled")
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val body = client.newCall(videoListRequest(episode)).awaitSuccess().bodyString()
+        // First, try the pure HTTP extractor (works for known hosters)
+        val httpVideos = try {
+            getHttpVideoList(episode)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (httpVideos.isNotEmpty()) return httpVideos
+
+        // If no hoster found, use the hidden WebView to capture the stream URL
+        return suspendCancellableCoroutine { cont ->
+            val webView = WebView(Aniyomi.instance).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        view?.postDelayed({
+                            view.evaluateJavascript(
+                                "(function(){" +
+                                    "var v=document.querySelector('video');" +
+                                    "if(v&&v.src)return v.src;" +
+                                    "var ifr=document.querySelector('iframe');" +
+                                    "if(ifr)return ifr.src;" +
+                                    "return '';" +
+                                    "})();"
+                            ) { result ->
+                                val videoUrl = result.trim('"')
+                                if (videoUrl.isNotEmpty() &&
+                                    (videoUrl.endsWith(".m3u8") || videoUrl.endsWith(".mp4"))
+                                ) {
+                                    val video = Video(videoUrl, "Auto", videoUrl)
+                                    if (cont.isActive) cont.resume(listOf(video))
+                                } else {
+                                    // Retry once after a longer delay
+                                    view.postDelayed({
+                                        view.evaluateJavascript(
+                                            "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();"
+                                        ) { retryResult ->
+                                            val retryUrl = retryResult.trim('"')
+                                            if (retryUrl.isNotEmpty()) {
+                                                val video = Video(retryUrl, "Auto", retryUrl)
+                                                if (cont.isActive) cont.resume(listOf(video))
+                                            } else {
+                                                if (cont.isActive) cont.resume(emptyList())
+                                            }
+                                        }
+                                    }, 5000)
+                                }
+                            }
+                        }, 8000)
+                    }
+                }
+                loadUrl(episode.url)
+            }
+            cont.invokeOnCancellation { webView.destroy() }
+        }
+    }
+
+    private suspend fun getHttpVideoList(episode: SEpisode): List<Video> {
+        val body = client.newCall(GET(episode.url, headers)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(body)
 
         val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
