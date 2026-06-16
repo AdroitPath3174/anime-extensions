@@ -117,28 +117,41 @@ class ToonStream : AnimeHttpSource() {
         }
     }
 
-    // ================= Episodes (all seasons) =================
+    // ================= Episodes =================
     override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
         val allEpisodes = mutableListOf<SEpisode>()
 
-        val initialEpisodes = doc.select("ul#episode_by_temp article.episodes a.lnk-blk")
-        initialEpisodes.forEachIndexed { idx, a ->
+        // If it's a movie, return a single episode
+        if (response.request.url.toString().contains("/movies/")) {
+            val title = doc.selectFirst("h1.entry-title")?.text() ?: "Movie"
+            allEpisodes.add(
+                SEpisode.create().apply {
+                    episode_number = 1f
+                    name = title
+                    url = response.request.url.toString()
+                },
+            )
+            return allEpisodes
+        }
+
+        // For series, extract episodes from the initial page
+        doc.select("ul#episode_by_temp article.episodes a.lnk-blk").forEachIndexed { idx, a ->
+            val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode ${idx + 1}"
             allEpisodes.add(
                 SEpisode.create().apply {
                     episode_number = (idx + 1).toFloat()
-                    name = a.parent()?.select("h2.entry-title")?.text() ?: "Episode ${idx + 1}"
+                    name = epTitle
                     url = a.attr("href")
                 },
             )
         }
 
+        // Check for additional seasons
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
-        if (seasonLinks.isEmpty() || seasonLinks.size == 1) {
-            return allEpisodes
-        }
+        if (seasonLinks.isEmpty() || seasonLinks.size == 1) return allEpisodes
 
         val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
         val maxSeason = seasonLinks.size
@@ -174,13 +187,13 @@ class ToonStream : AnimeHttpSource() {
                     html = Jsoup.parse(responseBody)
                 }
 
-                val episodeLinks = html.select("article.post.episodes a.lnk-blk")
-                episodeLinks.forEachIndexed { idx, a ->
+                html.select("article.post.episodes a.lnk-blk").forEach { a ->
+                    val epTitle = a.parent()?.select("h2.entry-title")?.text()
+                        ?: "Episode"
                     allEpisodes.add(
                         SEpisode.create().apply {
-                            episode_number = (idx + 1).toFloat()
-                            name = a.parent()?.select("h2.entry-title")?.text()
-                                ?: "Season $season Episode ${idx + 1}"
+                            episode_number = (allEpisodes.size + 1).toFloat()
+                            name = epTitle
                             url = a.attr("href")
                         },
                     )
@@ -193,7 +206,7 @@ class ToonStream : AnimeHttpSource() {
         return allEpisodes
     }
 
-    // ================= Video Extraction (HTTP + WebView fallback) =================
+    // ================= Video Extraction =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -212,31 +225,20 @@ class ToonStream : AnimeHttpSource() {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false
+                    var retryCount = 0
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            // Wait longer for the player to initialise
                             view?.postDelayed({
-                                view.evaluateJavascript(
-                                    "(function(){" +
-                                        "var v=document.querySelector('video');" +
-                                        "if(v&&v.src)return v.src;" +
-                                        "var ifr=document.querySelector('iframe');" +
-                                        "if(ifr)return ifr.src;" +
-                                        "return '';" +
-                                        "})();",
-                                ) { result ->
-                                    val videoUrl = result.trim('"')
-                                    if (videoUrl.isNotEmpty() &&
-                                        (videoUrl.endsWith(".m3u8") || videoUrl.endsWith(".mp4"))
-                                    ) {
+                                tryExtractVideo(view) { videoUrl ->
+                                    if (videoUrl != null) {
                                         val video = Video(videoUrl, "Auto", videoUrl)
                                         if (cont.isActive) cont.resume(listOf(video))
-                                    } else {
+                                    } else if (retryCount < 3) {
+                                        retryCount++
                                         view.postDelayed({
-                                            view.evaluateJavascript(
-                                                "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();",
-                                            ) { retryResult ->
-                                                val retryUrl = retryResult.trim('"')
-                                                if (retryUrl.isNotEmpty()) {
+                                            tryExtractVideo(view) { retryUrl ->
+                                                if (retryUrl != null) {
                                                     val video = Video(retryUrl, "Auto", retryUrl)
                                                     if (cont.isActive) cont.resume(listOf(video))
                                                 } else {
@@ -244,9 +246,11 @@ class ToonStream : AnimeHttpSource() {
                                                 }
                                             }
                                         }, 5000)
+                                    } else {
+                                        if (cont.isActive) cont.resume(emptyList())
                                     }
                                 }
-                            }, 8000)
+                            }, 10000)
                         }
                     }
                     loadUrl(episode.url)
@@ -256,9 +260,23 @@ class ToonStream : AnimeHttpSource() {
         }
     }
 
+    private fun tryExtractVideo(webView: WebView, callback: (String?) -> Unit) {
+        webView.evaluateJavascript(
+            "(function(){" +
+                "var v=document.querySelector('video');" +
+                "if(v&&v.src)return v.src;" +
+                "var ifr=document.querySelector('iframe');" +
+                "if(ifr)return ifr.src;" +
+                "return '';" +
+                "})();",
+        ) { result ->
+            val url = result.trim('"')
+            callback(if (url.isNotEmpty() && (url.endsWith(".m3u8") || url.endsWith(".mp4"))) url else null)
+        }
+    }
+
     /**
      * Get the global Application context using reflection.
-     * This is a stable backdoor that works without any special imports.
      */
     @Suppress("PrivateApi")
     private fun getApplicationContext(): android.content.Context = try {
@@ -266,7 +284,6 @@ class ToonStream : AnimeHttpSource() {
         val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
         currentApplicationMethod.invoke(null) as Application
     } catch (e: Exception) {
-        // Extremely unlikely to fail – fallback to null is not possible, so we throw
         throw IllegalStateException("Could not get Application context via reflection", e)
     }
 
@@ -286,6 +303,19 @@ class ToonStream : AnimeHttpSource() {
 
         val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
 
+        // Look for iframe URLs first
+        val iframeRegex = Regex("""src\s*=\s*["'](https?://[^"']+)["']""")
+        val iframeUrl = iframeRegex.find(script2)?.groupValues?.get(1)
+        if (iframeUrl != null) {
+            val iframeBody = client.newCall(GET(iframeUrl, headers)).awaitSuccess().bodyString()
+            val videoUrlRegex = Regex("""(?:file|src)\s*:\s*["'](https?://[^"']*\.(?:m3u8|mp4)[^"']*)["']""")
+            val videoMatch = videoUrlRegex.find(iframeBody)
+            if (videoMatch != null) {
+                return listOf(Video(videoMatch.groupValues[1], "Auto", videoMatch.groupValues[1]))
+            }
+        }
+
+        // Fallback to known hosters
         val hosterPatterns = listOf(
             "vidstream" to "gogo",
             "gogo" to "gogo",
@@ -298,6 +328,7 @@ class ToonStream : AnimeHttpSource() {
             "moonplayer" to "filemoon",
             "streamwish" to "streamwish",
             "wish" to "streamwish",
+            "20upload" to "gogo", // attempt generic extraction
         )
 
         val urlRegex = Regex("""(?:"|')((?:https?:)?//[^"'\s]+)(?:"|')""")
