@@ -203,7 +203,7 @@ class ToonStream : AnimeHttpSource() {
         if (httpVideos.isNotEmpty()) return httpVideos
 
         return suspendCancellableCoroutine { cont ->
-            val webView = WebView(Aniyomi.instance).apply {
+            val webView = WebView(context).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
