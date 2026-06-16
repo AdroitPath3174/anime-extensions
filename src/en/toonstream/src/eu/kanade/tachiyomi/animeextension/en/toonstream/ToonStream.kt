@@ -70,7 +70,6 @@ class ToonStream : AnimeHttpSource() {
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = Jsoup.parse(response.bodyString())
-        // Include both series and movies
         val elements = doc.select("ul.post-lst li").filter { li ->
             val href = li.select("a.lnk-blk").first()?.attr("href") ?: ""
             href.contains("/series/") || href.contains("/movies/")
@@ -122,7 +121,6 @@ class ToonStream : AnimeHttpSource() {
         val doc = Jsoup.parse(response.bodyString())
         val allEpisodes = mutableListOf<SEpisode>()
 
-        // 1. Extract Season 1 episodes already present in the HTML
         val initialEpisodes = doc.select("ul#episode_by_temp article.episodes a.lnk-blk")
         initialEpisodes.forEachIndexed { idx, a ->
             allEpisodes.add(
@@ -134,7 +132,6 @@ class ToonStream : AnimeHttpSource() {
             )
         }
 
-        // 2. Find how many seasons exist
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.isEmpty() || seasonLinks.size == 1) {
             return allEpisodes
@@ -143,7 +140,6 @@ class ToonStream : AnimeHttpSource() {
         val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
         val maxSeason = seasonLinks.size
 
-        // 3. Fetch remaining seasons (2..max) via AJAX
         for (season in 2..maxSeason) {
             try {
                 val body = "action=action_change_seas&season=$season&post=$postId"
@@ -175,7 +171,6 @@ class ToonStream : AnimeHttpSource() {
                     html = Jsoup.parse(responseBody)
                 }
 
-                // Use a broader selector to catch episode links
                 val episodeLinks = html.select("a.lnk-blk[href*=\"/episode/\"]")
                 episodeLinks.forEachIndexed { idx, a ->
                     allEpisodes.add(
@@ -195,10 +190,11 @@ class ToonStream : AnimeHttpSource() {
         return allEpisodes
     }
 
-    // ================= Video Extraction (WebView fallback) =================
+    // ================= Video Extraction =================
+    override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
+
     @SuppressLint("SetJavaScriptEnabled")
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        // First, try the pure HTTP extractor (works for known hosters)
         val httpVideos = try {
             getHttpVideoList(episode)
         } catch (_: Exception) {
@@ -206,7 +202,6 @@ class ToonStream : AnimeHttpSource() {
         }
         if (httpVideos.isNotEmpty()) return httpVideos
 
-        // If no hoster found, use the hidden WebView to capture the stream URL
         return suspendCancellableCoroutine { cont ->
             val webView = WebView(Aniyomi.instance).apply {
                 settings.javaScriptEnabled = true
@@ -222,7 +217,7 @@ class ToonStream : AnimeHttpSource() {
                                     "var ifr=document.querySelector('iframe');" +
                                     "if(ifr)return ifr.src;" +
                                     "return '';" +
-                                    "})();"
+                                    "})();",
                             ) { result ->
                                 val videoUrl = result.trim('"')
                                 if (videoUrl.isNotEmpty() &&
@@ -231,10 +226,9 @@ class ToonStream : AnimeHttpSource() {
                                     val video = Video(videoUrl, "Auto", videoUrl)
                                     if (cont.isActive) cont.resume(listOf(video))
                                 } else {
-                                    // Retry once after a longer delay
                                     view.postDelayed({
                                         view.evaluateJavascript(
-                                            "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();"
+                                            "(function(){ var v=document.querySelector('video'); return v?v.src:''; })();",
                                         ) { retryResult ->
                                             val retryUrl = retryResult.trim('"')
                                             if (retryUrl.isNotEmpty()) {
