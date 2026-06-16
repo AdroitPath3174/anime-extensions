@@ -2,70 +2,196 @@ package eu.kanade.tachiyomi.animeextension.en.toonstream
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.content.SharedPreferences
 import android.util.Base64
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import aniyomi.lib.doodextractor.DoodExtractor
-import aniyomi.lib.filemoonextractor.FilemoonExtractor
-import aniyomi.lib.gogostreamextractor.GogoStreamExtractor
-import aniyomi.lib.mp4uploadextractor.Mp4uploadExtractor
-import aniyomi.lib.okruextractor.OkruExtractor
-import aniyomi.lib.streamlareextractor.StreamlareExtractor
-import aniyomi.lib.streamwishextractor.StreamWishExtractor
-import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
-import eu.kanade.tachiyomi.animesource.model.AnimesPage
-import eu.kanade.tachiyomi.animesource.model.SAnime
-import eu.kanade.tachiyomi.animesource.model.SEpisode
-import eu.kanade.tachiyomi.animesource.model.Video
+import androidx.preference.ListPreference
+import androidx.preference.PreferenceScreen
+import aniyomi.lib.playlistutils.PlaylistUtils
+import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
+import eu.kanade.tachiyomi.animesource.model.*
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parallelCatchingFlatMap
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import java.security.MessageDigest
+import java.util.Locale
 import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
-class ToonStream : AnimeHttpSource() {
+class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
 
     override val name = "ToonStream"
     override val baseUrl = "https://toonstream.vip"
     override val lang = "en"
     override val supportsLatest = true
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set(
-            "User-Agent",
-            "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        )
-        .set("Referer", "$baseUrl/")
+    // ---------- Preferences ----------
+    private val preferences by getPreferencesLazy()
 
-    private val gogoStreamExtractor by lazy { GogoStreamExtractor(client) }
-    private val doodExtractor by lazy { DoodExtractor(client) }
-    private val okruExtractor by lazy { OkruExtractor(client) }
-    private val mp4uploadExtractor by lazy { Mp4uploadExtractor(client) }
-    private val streamlareExtractor by lazy { StreamlareExtractor(client) }
-    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
-    private val streamwishExtractor by lazy { StreamWishExtractor(client, headers) }
-
-    private fun fixUrl(url: String): String = when {
-        url.startsWith("//") -> "https:$url"
-        url.startsWith("http") -> url
-        else -> url
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        ListPreference(screen.context).apply {
+            key = "preferred_quality"
+            title = "Preferred quality"
+            entries = arrayOf("Auto", "1080p", "720p", "480p", "360p")
+            entryValues = arrayOf("Auto", "1080", "720", "480", "360")
+            setDefaultValue("Auto")
+            summary = "%s"
+        }.let(screen::addPreference)
     }
 
-    // ================= Browse (Series + Movies) =================
+    private val qualityPreference: String
+        get() = preferences.getString("preferred_quality", "Auto")!!
+
+    // ---------- Headers ----------
+    override fun headersBuilder() = super.headersBuilder()
+        .set("User-Agent", "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        .set("Referer", "$baseUrl/")
+
+    // ---------- Extractors ----------
+    private val playlistUtils by lazy { PlaylistUtils(client, headers) }
+
+    // ---------------------------------------------------------------
+    // Custom ToonStream Extractor
+    // ---------------------------------------------------------------
+    private inner class ToonStreamExtractor {
+        suspend fun getVideos(episodeUrl: String): List<Video> {
+            // Step 1: Fetch episode page
+            val episodeDoc = fetchAndParse(episodeUrl)
+
+            // Step 2: Find the first obfuscated script (litespeed JS)
+            val script1Url = episodeDoc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
+                ?: return emptyList()
+
+            // Step 3: Download and decode the first script to obtain the second script URL
+            val script1Content = fetch(script1Url)
+            val secondScriptUrl = extractSecondScriptUrl(script1Content) ?: return emptyList()
+
+            // Step 4: Fetch the second script (e.g., from 21wiz.com)
+            val script2Content = fetch(secondScriptUrl)
+
+            // Step 5: Try to extract a direct video URL or iframe URL from the second script
+            val directVideoUrl = extractDirectVideoUrl(script2Content)
+            if (directVideoUrl != null) {
+                return listOf(Video(directVideoUrl, "Direct", directVideoUrl))
+            }
+
+            val iframeUrl = extractIframeUrl(script2Content)
+            if (iframeUrl != null) {
+                val iframeDoc = fetchAndParse(iframeUrl)
+                val videoUrl = extractVideoFromIframe(iframeDoc)
+                if (videoUrl != null) {
+                    return if (videoUrl.endsWith(".m3u8")) {
+                        playlistUtils.extractFromHls(
+                            videoUrl,
+                            masterHeaders = headers,
+                            videoHeaders = headers,
+                            videoNameGen = { quality -> quality },
+                        )
+                    } else {
+                        listOf(Video(videoUrl, "SD", videoUrl))
+                    }
+                }
+            }
+
+            // Step 6: Try a deeper extraction – look for JSON config or API calls
+            val jsonConfigUrl = extractJsonConfigUrl(script2Content)
+            if (jsonConfigUrl != null) {
+                val json = fetch(jsonConfigUrl).parseAs<JsonObject>()
+                val streamUrl = json["file"]?.jsonPrimitive?.content
+                if (streamUrl != null) {
+                    return if (streamUrl.endsWith(".m3u8")) {
+                        playlistUtils.extractFromHls(
+                            streamUrl,
+                            masterHeaders = headers,
+                            videoHeaders = headers,
+                            videoNameGen = { quality -> quality },
+                        )
+                    } else {
+                        listOf(Video(streamUrl, "HD", streamUrl))
+                    }
+                }
+            }
+
+            return emptyList()
+        }
+
+        // ----- helpers -----
+        private suspend fun fetch(url: String): String {
+            return client.newCall(GET(url, headers)).awaitSuccess().bodyString()
+        }
+
+        private suspend fun fetchAndParse(url: String): Document {
+            return Jsoup.parse(fetch(url))
+        }
+
+        private fun extractSecondScriptUrl(scriptContent: String): String? {
+            val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
+            val mlMatch = mlRegex.find(scriptContent) ?: return null
+            val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
+            val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
+            return String(Base64.decode(joined, Base64.DEFAULT))
+        }
+
+        private fun extractDirectVideoUrl(script2: String): String? {
+            // Search for m3u8 or mp4 directly in the script
+            val regex = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""")
+            return regex.find(script2)?.value
+        }
+
+        private fun extractIframeUrl(script2: String): String? {
+            // Search for an iframe src attribute
+            val regex = Regex("""src\s*=\s*["'](https?://[^"']+)["']""")
+            return regex.find(script2)?.groupValues?.get(1)
+        }
+
+        private fun extractVideoFromIframe(doc: Document): String? {
+            // Try <video> src
+            val videoTag = doc.select("video source").first()
+            val src = videoTag?.attr("src")
+            if (!src.isNullOrBlank() && (src.endsWith(".mp4") || src.endsWith(".m3u8"))) {
+                return src
+            }
+            // Try a script that sets up the player
+            val scripts = doc.select("script")
+            for (script in scripts) {
+                val content = script.html()
+                val fileRegex = Regex("""file\s*:\s*["'](https?://[^"']+)["']""")
+                val match = fileRegex.find(content)
+                if (match != null) {
+                    return match.groupValues[1]
+                }
+            }
+            // Try another iframe inside (nested)
+            val nestedIframe = doc.select("iframe").first()
+            if (nestedIframe != null) {
+                val nestedSrc = nestedIframe.attr("src")
+                if (nestedSrc.isNotBlank()) return nestedSrc // might need further fetching, but we assume direct
+            }
+            return null
+        }
+
+        private fun extractJsonConfigUrl(script2: String): String? {
+            // Some players use a JSON config endpoint
+            val regex = Regex("""["'](https?://[^"']*\.json[^"']*)["']""")
+            return regex.find(script2)?.groupValues?.get(1)
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Standard AnimeHttpSource methods
+    // ---------------------------------------------------------------
     override fun popularAnimeRequest(page: Int): Request {
         val url = if (page == 1) "$baseUrl/home/" else "$baseUrl/home/page/$page/"
         return GET(url, headers)
@@ -96,264 +222,114 @@ class ToonStream : AnimeHttpSource() {
     }
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    override fun searchAnimeRequest(
-        page: Int,
-        query: String,
-        filters: AnimeFilterList,
-    ): Request = GET("$baseUrl/?s=$query&page=$page", headers)
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
+        GET("$baseUrl/?s=$query&page=$page", headers)
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    // ================= Details =================
     override fun animeDetailsRequest(anime: SAnime): Request = GET(anime.url, headers)
     override fun animeDetailsParse(response: Response): SAnime {
         val doc = Jsoup.parse(response.bodyString())
         return SAnime.create().apply {
             genre = doc.select("span.genres a").joinToString(", ") { it.text() }
             description = doc.select("div.description p").first()?.text() ?: ""
-            status = when {
-                doc.text().contains("Ongoing") -> SAnime.ONGOING
-                else -> SAnime.COMPLETED
-            }
+            status = if (doc.text().contains("Ongoing")) SAnime.ONGOING else SAnime.COMPLETED
         }
     }
 
-    // ================= Episodes =================
+    // ---------------------------------------------------------------
+    // Episodes (with movie support)
+    // ---------------------------------------------------------------
     override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
         val allEpisodes = mutableListOf<SEpisode>()
 
-        // If it's a movie, return a single episode
+        // Movie detection
         if (response.request.url.toString().contains("/movies/")) {
             val title = doc.selectFirst("h1.entry-title")?.text() ?: "Movie"
-            allEpisodes.add(
-                SEpisode.create().apply {
-                    episode_number = 1f
-                    name = title
-                    url = response.request.url.toString()
-                },
-            )
+            allEpisodes.add(SEpisode.create().apply {
+                episode_number = 1f
+                name = title
+                url = response.request.url.toString()
+            })
             return allEpisodes
         }
 
-        // For series, extract episodes from the initial page
-        doc.select("ul#episode_by_temp article.episodes a.lnk-blk").forEachIndexed { idx, a ->
-            val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode ${idx + 1}"
-            allEpisodes.add(
-                SEpisode.create().apply {
-                    episode_number = (idx + 1).toFloat()
-                    name = epTitle
-                    url = a.attr("href")
-                },
-            )
+        // Series – get initial episodes
+        doc.select("ul#episode_by_temp article.episodes a.lnk-blk").forEach { a ->
+            val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
+            allEpisodes.add(SEpisode.create().apply {
+                episode_number = (allEpisodes.size + 1).toFloat()
+                name = epTitle
+                url = a.attr("href")
+            })
         }
 
-        // Check for additional seasons
+        // Load additional seasons via AJAX
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
-        if (seasonLinks.isEmpty() || seasonLinks.size == 1) return allEpisodes
-
-        val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
-        val maxSeason = seasonLinks.size
-
-        for (season in 2..maxSeason) {
-            try {
-                val body = "action=action_change_seas&season=$season&post=$postId"
-                val ajaxReq = Request.Builder()
-                    .url("$baseUrl/wp-admin/admin-ajax.php")
-                    .headers(headers)
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .post(
-                        okhttp3.RequestBody.create(
-                            "application/x-www-form-urlencoded".toMediaType(),
-                            body,
-                        ),
-                    )
-                    .build()
-                val ajaxResponse = client.newCall(ajaxReq).execute()
-                val responseBody = ajaxResponse.bodyString()
-                var html: Document? = null
-
+        if (seasonLinks.size > 1) {
+            val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
+            for (season in 2..seasonLinks.size) {
                 try {
-                    val jsonObj = responseBody.parseAs<JsonObject>()
-                    val htmlStr = jsonObj["html"]?.jsonPrimitive?.content
-                    if (!htmlStr.isNullOrBlank()) {
-                        html = Jsoup.parse(htmlStr)
-                    }
-                } catch (_: Exception) { }
+                    val body = "action=action_change_seas&season=$season&post=$postId"
+                    val ajaxReq = Request.Builder()
+                        .url("$baseUrl/wp-admin/admin-ajax.php")
+                        .headers(headers)
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .post(okhttp3.RequestBody.create("application/x-www-form-urlencoded".toMediaType(), body))
+                        .build()
+                    val ajaxResponse = client.newCall(ajaxReq).execute()
+                    val responseBody = ajaxResponse.bodyString()
+                    var html: Document? = null
+                    try {
+                        val jsonObj = responseBody.parseAs<JsonObject>()
+                        val htmlStr = jsonObj["html"]?.jsonPrimitive?.content
+                        if (!htmlStr.isNullOrBlank()) html = Jsoup.parse(htmlStr)
+                    } catch (_: Exception) {}
+                    if (html == null) html = Jsoup.parse(responseBody)
 
-                if (html == null) {
-                    html = Jsoup.parse(responseBody)
-                }
-
-                html.select("article.post.episodes a.lnk-blk").forEach { a ->
-                    val epTitle = a.parent()?.select("h2.entry-title")?.text()
-                        ?: "Episode"
-                    allEpisodes.add(
-                        SEpisode.create().apply {
+                    html.select("article.post.episodes a.lnk-blk").forEach { a ->
+                        val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
+                        allEpisodes.add(SEpisode.create().apply {
                             episode_number = (allEpisodes.size + 1).toFloat()
                             name = epTitle
                             url = a.attr("href")
-                        },
-                    )
+                        })
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
 
         return allEpisodes
     }
 
-    // ================= Video Extraction =================
+    // ---------------------------------------------------------------
+    // Video extraction – uses custom extractor (no WebView)
+    // ---------------------------------------------------------------
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
-    @SuppressLint("SetJavaScriptEnabled")
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val httpVideos = try {
-            getHttpVideoList(episode)
-        } catch (_: Exception) {
-            emptyList()
-        }
-        if (httpVideos.isNotEmpty()) return httpVideos
-
-        return withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { cont ->
-                val ctx = getApplicationContext()
-                val webView = WebView(ctx).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    var retryCount = 0
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            // Wait longer for the player to initialise
-                            view?.postDelayed({
-                                tryExtractVideo(view) { videoUrl ->
-                                    if (videoUrl != null) {
-                                        val video = Video(videoUrl, "Auto", videoUrl)
-                                        if (cont.isActive) cont.resume(listOf(video))
-                                    } else if (retryCount < 3) {
-                                        retryCount++
-                                        view.postDelayed({
-                                            tryExtractVideo(view) { retryUrl ->
-                                                if (retryUrl != null) {
-                                                    val video = Video(retryUrl, "Auto", retryUrl)
-                                                    if (cont.isActive) cont.resume(listOf(video))
-                                                } else {
-                                                    if (cont.isActive) cont.resume(emptyList())
-                                                }
-                                            }
-                                        }, 5000)
-                                    } else {
-                                        if (cont.isActive) cont.resume(emptyList())
-                                    }
-                                }
-                            }, 10000)
-                        }
-                    }
-                    loadUrl(episode.url)
-                }
-                cont.invokeOnCancellation { webView.destroy() }
-            }
-        }
+        val extractor = ToonStreamExtractor()
+        val videos = extractor.getVideos(episode.url)
+        return applyQualityFilter(videos)
     }
 
-    private fun tryExtractVideo(webView: WebView, callback: (String?) -> Unit) {
-        webView.evaluateJavascript(
-            "(function(){" +
-                "var v=document.querySelector('video');" +
-                "if(v&&v.src)return v.src;" +
-                "var ifr=document.querySelector('iframe');" +
-                "if(ifr)return ifr.src;" +
-                "return '';" +
-                "})();",
-        ) { result ->
-            val url = result.trim('"')
-            callback(if (url.isNotEmpty() && (url.endsWith(".m3u8") || url.endsWith(".mp4"))) url else null)
-        }
+    private fun applyQualityFilter(videos: List<Video>): List<Video> {
+        val quality = qualityPreference
+        if (quality == "Auto") return videos
+        return videos.filter { it.quality.contains(quality, ignoreCase = true) }.ifEmpty { videos }
     }
 
-    /**
-     * Get the global Application context using reflection.
-     */
-    @Suppress("PrivateApi")
-    private fun getApplicationContext(): android.content.Context = try {
-        val activityThreadClass = Class.forName("android.app.ActivityThread")
-        val currentApplicationMethod = activityThreadClass.getMethod("currentApplication")
-        currentApplicationMethod.invoke(null) as Application
-    } catch (e: Exception) {
-        throw IllegalStateException("Could not get Application context via reflection", e)
-    }
-
-    private suspend fun getHttpVideoList(episode: SEpisode): List<Video> {
-        val body = client.newCall(GET(episode.url, headers)).awaitSuccess().bodyString()
-        val doc = Jsoup.parse(body)
-
-        val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
-            ?: return emptyList()
-        val script1 = client.newCall(GET(scriptSrc, headers)).awaitSuccess().bodyString()
-
-        val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
-        val mlMatch = mlRegex.find(script1) ?: return emptyList()
-        val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
-        val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
-        val secondScriptUrl = String(Base64.decode(joined, Base64.DEFAULT))
-
-        val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
-
-        // Look for iframe URLs first
-        val iframeRegex = Regex("""src\s*=\s*["'](https?://[^"']+)["']""")
-        val iframeUrl = iframeRegex.find(script2)?.groupValues?.get(1)
-        if (iframeUrl != null) {
-            val iframeBody = client.newCall(GET(iframeUrl, headers)).awaitSuccess().bodyString()
-            val videoUrlRegex = Regex("""(?:file|src)\s*:\s*["'](https?://[^"']*\.(?:m3u8|mp4)[^"']*)["']""")
-            val videoMatch = videoUrlRegex.find(iframeBody)
-            if (videoMatch != null) {
-                return listOf(Video(videoMatch.groupValues[1], "Auto", videoMatch.groupValues[1]))
-            }
-        }
-
-        // Fallback to known hosters
-        val hosterPatterns = listOf(
-            "vidstream" to "gogo",
-            "gogo" to "gogo",
-            "dood" to "dood",
-            "ok.ru" to "okru",
-            "okru" to "okru",
-            "mp4upload" to "mp4upload",
-            "streamlare" to "streamlare",
-            "filemoon" to "filemoon",
-            "moonplayer" to "filemoon",
-            "streamwish" to "streamwish",
-            "wish" to "streamwish",
-            "20upload" to "gogo", // attempt generic extraction
-        )
-
-        val urlRegex = Regex("""(?:"|')((?:https?:)?//[^"'\s]+)(?:"|')""")
-        val allUrls = urlRegex.findAll(script2).map { it.groupValues[1] }.toList()
-
-        val candidates = allUrls.mapNotNull { url ->
-            val lower = url.lowercase()
-            val match = hosterPatterns.firstOrNull { lower.contains(it.first) }
-            if (match != null) Pair(url, match.second) else null
-        }
-
-        return candidates.parallelCatchingFlatMap { (url, hoster) ->
-            when (hoster) {
-                "gogo" -> gogoStreamExtractor.videosFromUrl(url)
-                "dood" -> doodExtractor.videosFromUrl(url)
-                "okru" -> okruExtractor.videosFromUrl(url)
-                "mp4upload" -> mp4uploadExtractor.videosFromUrl(url, headers)
-                "streamlare" -> streamlareExtractor.videosFromUrl(url)
-                "filemoon" -> filemoonExtractor.videosFromUrl(url, prefix = "Filemoon:")
-                "streamwish" -> streamwishExtractor.videosFromUrl(
-                    url,
-                    videoNameGen = { quality: String -> "StreamWish:$quality" },
-                )
-                else -> emptyList()
-            }
-        }
+    // ---------------------------------------------------------------
+    // Utility
+    // ---------------------------------------------------------------
+    private fun fixUrl(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("http") -> url
+        else -> url
     }
 }
