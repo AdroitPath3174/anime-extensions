@@ -1,34 +1,30 @@
 package eu.kanade.tachiyomi.animeextension.en.toonstream
 
-import android.annotation.SuppressLint
 import android.app.Application
-import android.content.SharedPreferences
-import android.util.Base64
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
-import eu.kanade.tachiyomi.animesource.model.*
+import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
+import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.*
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import java.security.MessageDigest
-import java.util.Locale
-import kotlin.coroutines.resume
-import kotlinx.coroutines.suspendCancellableCoroutine
+import android.util.Base64
 
 class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
 
@@ -56,7 +52,11 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
 
     // ---------- Headers ----------
     override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 10; Redmi 5A) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        )
         .set("Referer", "$baseUrl/")
 
     // ---------- Extractors ----------
@@ -222,8 +222,11 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
     }
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request =
-        GET("$baseUrl/?s=$query&page=$page", headers)
+    override fun searchAnimeRequest(
+        page: Int,
+        query: String,
+        filters: AnimeFilterList,
+    ): Request = GET("$baseUrl/?s=$query&page=$page", headers)
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request = GET(anime.url, headers)
@@ -248,22 +251,26 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
         // Movie detection
         if (response.request.url.toString().contains("/movies/")) {
             val title = doc.selectFirst("h1.entry-title")?.text() ?: "Movie"
-            allEpisodes.add(SEpisode.create().apply {
-                episode_number = 1f
-                name = title
-                url = response.request.url.toString()
-            })
+            allEpisodes.add(
+                SEpisode.create().apply {
+                    episode_number = 1f
+                    name = title
+                    url = response.request.url.toString()
+                },
+            )
             return allEpisodes
         }
 
         // Series – get initial episodes
         doc.select("ul#episode_by_temp article.episodes a.lnk-blk").forEach { a ->
             val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
-            allEpisodes.add(SEpisode.create().apply {
-                episode_number = (allEpisodes.size + 1).toFloat()
-                name = epTitle
-                url = a.attr("href")
-            })
+            allEpisodes.add(
+                SEpisode.create().apply {
+                    episode_number = (allEpisodes.size + 1).toFloat()
+                    name = epTitle
+                    url = a.attr("href")
+                },
+            )
         }
 
         // Load additional seasons via AJAX
@@ -278,7 +285,12 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
                         .headers(headers)
                         .header("Content-Type", "application/x-www-form-urlencoded")
                         .header("X-Requested-With", "XMLHttpRequest")
-                        .post(okhttp3.RequestBody.create("application/x-www-form-urlencoded".toMediaType(), body))
+                        .post(
+                            okhttp3.RequestBody.create(
+                                "application/x-www-form-urlencoded".toMediaType(),
+                                body,
+                            ),
+                        )
                         .build()
                     val ajaxResponse = client.newCall(ajaxReq).execute()
                     val responseBody = ajaxResponse.bodyString()
@@ -292,11 +304,13 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
 
                     html.select("article.post.episodes a.lnk-blk").forEach { a ->
                         val epTitle = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
-                        allEpisodes.add(SEpisode.create().apply {
-                            episode_number = (allEpisodes.size + 1).toFloat()
-                            name = epTitle
-                            url = a.attr("href")
-                        })
+                        allEpisodes.add(
+                            SEpisode.create().apply {
+                                episode_number = (allEpisodes.size + 1).toFloat()
+                                name = epTitle
+                                url = a.attr("href")
+                            },
+                        )
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
