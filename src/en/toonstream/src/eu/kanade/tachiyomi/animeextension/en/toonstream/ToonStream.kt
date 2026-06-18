@@ -98,7 +98,7 @@ class ToonStream :
                             videoUrl,
                             masterHeaders = headers,
                             videoHeaders = headers,
-                            videoNameGen = { quality -> quality },
+                            videoNameGen = { quality: String -> quality },
                         )
                     } else {
                         listOf(Video(videoUrl, "SD", videoUrl))
@@ -117,7 +117,7 @@ class ToonStream :
                             streamUrl,
                             masterHeaders = headers,
                             videoHeaders = headers,
-                            videoNameGen = { quality -> quality },
+                            videoNameGen = { quality: String -> quality },
                         )
                     } else {
                         listOf(Video(streamUrl, "HD", streamUrl))
