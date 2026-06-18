@@ -1,6 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.en.toonstream
 
-import android.app.Application
+import android.util.Base64
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.playlistutils.PlaylistUtils
@@ -24,9 +24,10 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import android.util.Base64
 
-class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
+class ToonStream :
+    AnimeHttpSource(),
+    ConfigurableAnimeSource {
 
     override val name = "ToonStream"
     override val baseUrl = "https://toonstream.vip"
@@ -128,13 +129,11 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
         }
 
         // ----- helpers -----
-        private suspend fun fetch(url: String): String {
-            return client.newCall(GET(url, headers)).awaitSuccess().bodyString()
-        }
+        private suspend fun fetch(url: String): String =
+            client.newCall(GET(url, headers)).awaitSuccess().bodyString()
 
-        private suspend fun fetchAndParse(url: String): Document {
-            return Jsoup.parse(fetch(url))
-        }
+        private suspend fun fetchAndParse(url: String): Document =
+            Jsoup.parse(fetch(url))
 
         private fun extractSecondScriptUrl(scriptContent: String): String? {
             val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
@@ -145,25 +144,21 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
         }
 
         private fun extractDirectVideoUrl(script2: String): String? {
-            // Search for m3u8 or mp4 directly in the script
             val regex = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""")
             return regex.find(script2)?.value
         }
 
         private fun extractIframeUrl(script2: String): String? {
-            // Search for an iframe src attribute
             val regex = Regex("""src\s*=\s*["'](https?://[^"']+)["']""")
             return regex.find(script2)?.groupValues?.get(1)
         }
 
         private fun extractVideoFromIframe(doc: Document): String? {
-            // Try <video> src
             val videoTag = doc.select("video source").first()
             val src = videoTag?.attr("src")
             if (!src.isNullOrBlank() && (src.endsWith(".mp4") || src.endsWith(".m3u8"))) {
                 return src
             }
-            // Try a script that sets up the player
             val scripts = doc.select("script")
             for (script in scripts) {
                 val content = script.html()
@@ -173,17 +168,15 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
                     return match.groupValues[1]
                 }
             }
-            // Try another iframe inside (nested)
             val nestedIframe = doc.select("iframe").first()
             if (nestedIframe != null) {
                 val nestedSrc = nestedIframe.attr("src")
-                if (nestedSrc.isNotBlank()) return nestedSrc // might need further fetching, but we assume direct
+                if (nestedSrc.isNotBlank()) return nestedSrc
             }
             return null
         }
 
         private fun extractJsonConfigUrl(script2: String): String? {
-            // Some players use a JSON config endpoint
             val regex = Regex("""["'](https?://[^"']*\.json[^"']*)["']""")
             return regex.find(script2)?.groupValues?.get(1)
         }
@@ -346,4 +339,4 @@ class ToonStream : AnimeHttpSource(), ConfigurableAnimeSource {
         url.startsWith("http") -> url
         else -> url
     }
-}
+    }
