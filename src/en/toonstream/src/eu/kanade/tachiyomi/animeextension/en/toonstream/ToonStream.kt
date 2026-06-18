@@ -129,11 +129,9 @@ class ToonStream :
         }
 
         // ----- helpers -----
-        private suspend fun fetch(url: String): String =
-            client.newCall(GET(url, headers)).awaitSuccess().bodyString()
+        private suspend fun fetch(url: String): String = client.newCall(GET(url, headers)).awaitSuccess().bodyString()
 
-        private suspend fun fetchAndParse(url: String): Document =
-            Jsoup.parse(fetch(url))
+        private suspend fun fetchAndParse(url: String): Document = Jsoup.parse(fetch(url))
 
         private fun extractSecondScriptUrl(scriptContent: String): String? {
             val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
