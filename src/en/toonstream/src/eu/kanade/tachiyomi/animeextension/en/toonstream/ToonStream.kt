@@ -12,7 +12,6 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -89,13 +88,14 @@ class ToonStream : AnimeHttpSource() {
         }
     }
 
-    // ================= Episodes (with movie support) =================
+    // ================= Episodes (website names, no season prefix) =================
     override fun episodeListRequest(anime: SAnime): Request = GET(anime.url, headers)
 
     override fun episodeListParse(response: Response): List<SEpisode> {
         val doc = Jsoup.parse(response.bodyString())
         val allEpisodes = mutableListOf<SEpisode>()
 
+        // Movie detection
         if (response.request.url.toString().contains("/movies/")) {
             val title = doc.selectFirst("h1.entry-title")?.text() ?: "Movie"
             allEpisodes.add(
@@ -108,16 +108,25 @@ class ToonStream : AnimeHttpSource() {
             return allEpisodes
         }
 
-        doc.select("ul#episode_by_temp article.episodes a.lnk-blk").forEach { a ->
-            allEpisodes.add(
-                SEpisode.create().apply {
-                    episode_number = (allEpisodes.size + 1).toFloat()
-                    name = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
-                    url = a.attr("href")
-                },
-            )
+        // Extract episodes from the page – they already have the correct names like "Jujutsu Kaisen 1x1", "Jujutsu Kaisen 2x2"
+        fun extractFromDocument(doc: Document) {
+            doc.select("article.episodes a.lnk-blk").forEach { a ->
+                val titleEl = a.parent()?.select("h2.entry-title")?.first()
+                val name = titleEl?.text() ?: return@forEach
+                allEpisodes.add(
+                    SEpisode.create().apply {
+                        episode_number = (allEpisodes.size + 1).toFloat()
+                        this.name = name
+                        url = a.attr("href")
+                    },
+                )
+            }
         }
 
+        // Initial season (1)
+        extractFromDocument(doc)
+
+        // Additional seasons via AJAX
         val seasonLinks = doc.select("div.choose-season ul.aa-cnt li.sel-temp a")
         if (seasonLinks.size > 1) {
             val postId = seasonLinks.first()?.attr("data-post") ?: return allEpisodes
@@ -145,87 +154,74 @@ class ToonStream : AnimeHttpSource() {
                         if (!htmlStr.isNullOrBlank()) html = Jsoup.parse(htmlStr)
                     } catch (_: Exception) {}
                     if (html == null) html = Jsoup.parse(responseBody)
-
-                    html.select("article.post.episodes a.lnk-blk").forEach { a ->
-                        allEpisodes.add(
-                            SEpisode.create().apply {
-                                episode_number = (allEpisodes.size + 1).toFloat()
-                                name = a.parent()?.select("h2.entry-title")?.text() ?: "Episode"
-                                url = a.attr("href")
-                            },
-                        )
-                    }
+                    extractFromDocument(html)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
         }
+
         return allEpisodes
     }
 
-    // ================= Video extraction (pure HTTP, self‑contained) =================
+    // ================= Video extraction – complete 3‑step script chain =================
     override fun videoListRequest(episode: SEpisode): Request = GET(episode.url, headers)
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val body = client.newCall(videoListRequest(episode)).awaitSuccess().bodyString()
         val doc = Jsoup.parse(body)
 
-        // 1. Find obfuscated script
-        val scriptSrc = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
+        // 1. First obfuscated script (litespeed JS) -> leads to 21wiz.com script
+        val script1Src = doc.select("script[src*=\"litespeed/js/\"]").first()?.attr("src")
             ?: return emptyList()
-        val script1 = client.newCall(GET(scriptSrc, headers)).awaitSuccess().bodyString()
+        val script1 = client.newCall(GET(script1Src, headers)).awaitSuccess().bodyString()
 
-        // 2. Decode second script URL
+        // Decode the _ml array to get the second script URL
         val mlRegex = Regex("""_ml\s*=\s*JSON\.parse\('(\[[^\]]*\])'\)""")
-        val mlMatch = mlRegex.find(script1) ?: return emptyList()
-        val mlArray = mlMatch.groupValues[1].parseAs<JsonArray>()
-        val joined = mlArray.joinToString("") { it.jsonPrimitive.content }
-        val secondScriptUrl = String(Base64.decode(joined, Base64.DEFAULT))
+        val mlMatch1 = mlRegex.find(script1) ?: return emptyList()
+        val mlArray1 = mlMatch1.groupValues[1].parseAs<JsonArray>()
+        val joined1 = mlArray1.joinToString("") { it.jsonPrimitive.content }
+        val secondScriptUrl = String(Base64.decode(joined1, Base64.DEFAULT))
 
-        // 3. Fetch second script
+        // 2. Fetch second script (e.g., from 21wiz.com)
         val script2 = client.newCall(GET(secondScriptUrl, headers)).awaitSuccess().bodyString()
 
-        // 4. Try to find direct .m3u8/.mp4
-        val directRegex = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""")
-        val directMatch = directRegex.find(script2)
-        if (directMatch != null) {
-            return listOf(Video(directMatch.value, "Direct", directMatch.value))
-        }
+        // 3. Second script contains its own _ml array – decode to get the third script URL
+        val mlMatch2 = mlRegex.find(script2)
+        if (mlMatch2 != null) {
+            val mlArray2 = mlMatch2.groupValues[1].parseAs<JsonArray>()
+            val joined2 = mlArray2.joinToString("") { it.jsonPrimitive.content }
+            // The website appends a timestamp to the decoded URL; simulate that
+            val timestamp = (System.currentTimeMillis() / 1000.0).toString()
+            val thirdScriptUrl = String(Base64.decode(joined2, Base64.DEFAULT)) + timestamp
 
-        // 5. Look for an iframe URL in the script
-        val iframeRegex = Regex("""src\s*=\s*["'](https?://[^"']+)["']""")
-        val iframeMatch = iframeRegex.find(script2)
-        if (iframeMatch != null) {
-            val iframeUrl = iframeMatch.groupValues[1]
-            val iframeBody = client.newCall(GET(iframeUrl, headers)).awaitSuccess().bodyString()
-            val iframeDoc = Jsoup.parse(iframeBody)
+            // 4. Fetch the third script – this one sets up the player
+            val script3 = client.newCall(GET(thirdScriptUrl, headers)).awaitSuccess().bodyString()
 
-            // Try <video> src
-            val videoTag = iframeDoc.select("video source").first()
-            val src = videoTag?.attr("src")
-            if (!src.isNullOrBlank() && (src.endsWith(".mp4") || src.endsWith(".m3u8"))) {
-                return listOf(Video(src, "Iframe", src))
+            // 5. Extract video URL from the third script
+            // Look for direct .m3u8/.mp4
+            val directVideo = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""").find(script3)
+            if (directVideo != null) {
+                return listOf(Video(directVideo.value, "Auto", directVideo.value))
             }
 
-            // Try JSON config in iframe's scripts
-            val jsonRegex = Regex("""file\s*:\s*["'](https?://[^"']+)["']""")
-            for (script in iframeDoc.select("script")) {
-                val content = script.html()
-                val jsonMatch = jsonRegex.find(content)
-                if (jsonMatch != null) {
-                    val videoUrl = jsonMatch.groupValues[1]
-                    return listOf(Video(videoUrl, "Iframe", videoUrl))
+            // Look for an iframe src
+            val iframeSrc = Regex("""src\s*=\s*["'](https?://[^"']+)["']""").find(script3)?.groupValues?.get(1)
+            if (iframeSrc != null) {
+                val iframeBody = client.newCall(GET(iframeSrc, headers)).awaitSuccess().bodyString()
+                val iframeDoc = Jsoup.parse(iframeBody)
+                val videoSrc = iframeDoc.select("video source").first()?.attr("src")
+                    ?: iframeDoc.select("iframe").first()?.attr("src")
+                if (!videoSrc.isNullOrBlank()) {
+                    return listOf(Video(videoSrc, "Auto", videoSrc))
                 }
             }
         }
 
-        // 6. Last resort: try to find any .m3u8/.mp4 in the episode page itself (some sites put it in a data attribute)
-        val pageVideos = doc.select("video source")
-        if (pageVideos.isNotEmpty()) {
-            val vSrc = pageVideos.first()?.attr("src") ?: ""
-            if (vSrc.isNotBlank()) {
-                return listOf(Video(vSrc, "Page", vSrc))
-            }
+        // Fallback: try to find a video URL directly in the second script (some episodes might use a simpler player)
+        val fallbackVideo = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""").find(script2)
+        if (fallbackVideo != null) {
+            return listOf(Video(fallbackVideo.value, "Auto", fallbackVideo.value))
         }
 
         return emptyList()
