@@ -12,6 +12,7 @@ import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -218,7 +219,7 @@ class ToonStream : AnimeHttpSource() {
             }
         }
 
-        // Fallback: try to find a video URL directly in the second script (some episodes might use a simpler player)
+        // Fallback: try to find a video URL directly in the second script
         val fallbackVideo = Regex("""(https?://[^"'\s]*\.(?:m3u8|mp4)[^"'\s]*)""").find(script2)
         if (fallbackVideo != null) {
             return listOf(Video(fallbackVideo.value, "Auto", fallbackVideo.value))
